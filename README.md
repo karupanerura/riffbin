@@ -1,4 +1,4 @@
-# github.com/karupanerura/riffbin ![](https://github.com/karupanerura/riffbin/workflows/CI/badge.svg?branch=main) [![Go Reference](https://pkg.go.dev/badge/github.com/karupanerura/riffbin.svg)](https://pkg.go.dev/github.com/karupanerura/riffbin) [![codecov.io](https://codecov.io/github/karupanerura/riffbin/coverage.svg?branch=main)](https://codecov.io/github/karupanerura/riffbin?branch=main)
+# github.com/karupanerura/riffbin ![](https://github.com/karupanerura/riffbin/workflows/test/badge.svg?branch=main) [![Go Reference](https://pkg.go.dev/badge/github.com/karupanerura/riffbin.svg)](https://pkg.go.dev/github.com/karupanerura/riffbin) [![codecov.io](https://codecov.io/github/karupanerura/riffbin/coverage.svg?branch=main)](https://codecov.io/github/karupanerura/riffbin?branch=main)
 
 Go module implementing for RIFF binary format.
 
