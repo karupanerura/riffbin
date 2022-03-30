@@ -7,23 +7,40 @@ import (
 	"io"
 )
 
-// ErrUnexpectedRIFF is an error for unexpected RIFF file format.
-var ErrUnexpectedRIFF = errors.New("unexpected RIFF id")
+var (
+	// ErrInvalidFormat is an error for invalid RIFF file format.
+	ErrInvalidFormat = errors.New("invlaid format")
+)
 
 func ReadFull(r io.Reader) (*RIFFChunk, error) {
 	var buf [4]byte
 
 	// read id and verify
-	if _, err := io.ReadFull(r, buf[:idBytes]); err != nil {
+	if _, err := io.ReadFull(r, buf[:idBytes]); err == io.EOF || err == io.ErrUnexpectedEOF {
+		return nil, ErrInvalidFormat
+	} else if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(riffID[:], buf[:idBytes]) {
-		return nil, ErrUnexpectedRIFF
+		return nil, ErrInvalidFormat
 	}
 
 	ch := groupedChunkHeader{id: riffID}
 	chunk, err := readGroupedChunkAfterID(r, &ch)
-	if err != nil {
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		return nil, ErrInvalidFormat
+	} else if err != nil {
+		return nil, err
+	}
+
+	// verify EOF
+	if n, err := r.Read(buf[:1]); err == nil {
+		// too long payload (too small payload size)
+		return nil, ErrInvalidFormat
+	} else if n == 0 && err == io.EOF {
+		// OK
+	} else {
+		// any other I/O error is occurred
 		return nil, err
 	}
 
