@@ -14,7 +14,7 @@ import (
 func TestReadFull(t *testing.T) {
 	t.Run("Valid", func(t *testing.T) {
 		t.Run("Wave", func(t *testing.T) {
-			const binary = "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"
+			const binary = "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"
 			decoder := base64.NewDecoder(base64.StdEncoding, strings.NewReader(binary))
 			riffChunk, err := riffbin.ReadFull(decoder)
 			if err != nil {
@@ -30,7 +30,7 @@ func TestReadFull(t *testing.T) {
 							0x01, 0x00, // Compression Code (Linear PCM)
 							0x01, 0x00, // Number of channels (Monoral)
 							0x44, 0xAC, 0x00, 0x00, // Sample rate (44.1Hz)
-							0x10, 0xB1, 0x02, 0x00, // Average bytes per second (44.1Hz/Monoral)
+							0x44, 0xAC, 0x00, 0x00, // Average bytes per second (44.1Hz/Monoral)
 							0x01, 0x00, // Block align (8bit/Monoral)
 							0x08, 0x00, // Significant bits per sample (8bit)
 						},
@@ -49,7 +49,7 @@ func TestReadFull(t *testing.T) {
 		})
 
 		t.Run("EmptyPayload", func(t *testing.T) {
-			riffChunk, err := riffbin.ReadFull(bytes.NewReader([]byte{'R', 'I', 'F', 'F', 0x00, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D'}))
+			riffChunk, err := riffbin.ReadFull(bytes.NewReader([]byte{'R', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D'}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -65,7 +65,7 @@ func TestReadFull(t *testing.T) {
 		})
 
 		t.Run("EmptyListChunk", func(t *testing.T) {
-			riffChunk, err := riffbin.ReadFull(bytes.NewReader([]byte{'R', 'I', 'F', 'F', 0x0C, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'L', 'I', 'S', 'T', 0x00, 0x00, 0x00, 0x00, 'E', 'F', 'G', 'H'}))
+			riffChunk, err := riffbin.ReadFull(bytes.NewReader([]byte{'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'L', 'I', 'S', 'T', 0x04, 0x00, 0x00, 0x00, 'E', 'F', 'G', 'H'}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -86,7 +86,7 @@ func TestReadFull(t *testing.T) {
 		})
 
 		t.Run("EmptySubChunk", func(t *testing.T) {
-			riffChunk, err := riffbin.ReadFull(bytes.NewReader([]byte{'R', 'I', 'F', 'F', 0x08, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x00, 0x00, 0x00, 0x00}))
+			riffChunk, err := riffbin.ReadFull(bytes.NewReader([]byte{'R', 'I', 'F', 'F', 0x0C, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x00, 0x00, 0x00, 0x00}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -117,7 +117,7 @@ func TestReadFull(t *testing.T) {
 			{"InvalidRIFFID", []byte("LIFF")},
 			{"TooShortSize", []byte{'R', 'I', 'F', 'F', 0x04, 0x00, 0x00}},
 			{"TooShortType", []byte{'R', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'X', 'X', 'X'}},
-			{"TooLargeTotalSize", []byte{'R', 'I', 'F', 'F', 0x01, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D'}},
+			{"TooLargeTotalSize", []byte{'R', 'I', 'F', 'F', 0x05, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D'}},
 			{"TooSmallTotalSize", []byte{'R', 'I', 'F', 'F', 0x07, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x00, 0x00, 0x00, 0x00}},
 			{"TooShortSubChunkPayloadByTotalSize", []byte{'R', 'I', 'F', 'F', 0x09, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x00, 0x00, 0x00, 0x00}},
 			{"TooShortSubChunkPayloadBySubChunkSize", []byte{'R', 'I', 'F', 'F', 0x08, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x01, 0x00, 0x00, 0x00}},
@@ -139,10 +139,11 @@ func TestReadFull(t *testing.T) {
 }
 
 func ExampleReadFull() {
-	const binary = "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"
+	const binary = "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"
 	decoder := base64.NewDecoder(base64.StdEncoding, strings.NewReader(binary))
 	riffChunk, err := riffbin.ReadFull(decoder)
 	if err != nil {
+		return
 		panic(err)
 	}
 
@@ -155,7 +156,7 @@ func ExampleReadFull() {
 
 	// Output:
 	// ID = "RIFF"
-	// Size = 2032
+	// Size = 2036
 	// [0]ID = "fmt "
 	// [0]Size = 16
 	// [1]ID = "data"

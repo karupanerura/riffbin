@@ -52,7 +52,7 @@ func TestRIFFChunk(t *testing.T) {
 	if chunk.HeaderSize() != 12 {
 		t.Errorf("unexpected header size: %d", chunk.HeaderSize())
 	}
-	if chunk.BodySize() != 44 {
+	if chunk.BodySize() != 48 {
 		t.Errorf("unexpected body size: %d", chunk.BodySize())
 	}
 }
@@ -80,7 +80,7 @@ func TestListChunk(t *testing.T) {
 	if chunk.HeaderSize() != 12 {
 		t.Errorf("unexpected header size: %d", chunk.HeaderSize())
 	}
-	if chunk.BodySize() != 44 {
+	if chunk.BodySize() != 48 {
 		t.Errorf("unexpected body size: %d", chunk.BodySize())
 	}
 }

@@ -76,18 +76,17 @@ func readGroupedChunkAfterID(r io.Reader, chunk *groupedChunkHeader) (groupedChu
 	if _, err := io.ReadFull(r, buf[:sizeBytes]); err != nil {
 		return nil, err
 	}
-	bodyLen := binary.LittleEndian.Uint32(buf[:])
+	rr := &io.LimitedReader{R: r, N: int64(binary.LittleEndian.Uint32(buf[:]))}
 
 	// read type
-	if _, err := io.ReadFull(r, chunk.groupType[:typeBytes]); err != nil {
+	if _, err := io.ReadFull(rr, chunk.groupType[:typeBytes]); err != nil {
 		return nil, err
 	}
-	if bodyLen == 0 {
+	if rr.N == 0 {
 		return chunk.toGroupedChunk([]Chunk{}), nil
 	}
 
 	// read sub-chunks
-	rr := &io.LimitedReader{R: r, N: int64(bodyLen)}
 	var payload []Chunk
 	for rr.N > 0 {
 		if _, err := io.ReadFull(rr, buf[:idBytes]); err != nil {

@@ -87,7 +87,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 
 		expected := []byte{
 			0x52, 0x49, 0x46, 0x46, // id (RIFF)
-			0x0e, 0x00, 0x00, 0x00, // body size
+			0x12, 0x00, 0x00, 0x00, // body size
 			0x54, 0x45, 0x53, 0x54, // type (TEST)
 			0x45, 0x4e, 0x54, 0x31, // id (ENT1)
 			0x06, 0x00, 0x00, 0x00, // body size
@@ -171,7 +171,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 		if n != int64(buf.Len()) {
 			t.Errorf("n should be %d but got %d", buf.Len(), n)
 		}
-		if s := c.Sum32(); s != 1717141340 {
+		if s := c.Sum32(); s != 1953840023 {
 			t.Errorf("unexpected check sum: %d", s)
 			t.Log(hex.Dump(buf.Bytes()))
 		}
@@ -206,7 +206,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 		if n != int64(buf.Len()) {
 			t.Errorf("n should be %d but got %d", buf.Len(), n)
 		}
-		if s := c.Sum32(); s != 1589510010 {
+		if s := c.Sum32(); s != 1759927271 {
 			t.Errorf("unexpected check sum: %d", s)
 			t.Log(hex.Dump(buf.Bytes()))
 		}
@@ -291,7 +291,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 		// check contents
 		expected := []byte{
 			0x52, 0x49, 0x46, 0x46, // id (RIFF)
-			0x0e, 0x00, 0x00, 0x00, // body size
+			0x12, 0x00, 0x00, 0x00, // body size
 			0x54, 0x45, 0x53, 0x54, // type (TEST)
 			0x45, 0x4e, 0x54, 0x31, // id (ENT1)
 			0x06, 0x00, 0x00, 0x00, // body size
@@ -349,7 +349,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 		// check contents
 		expected := []byte{
 			0x52, 0x49, 0x46, 0x46, // id (RIFF)
-			0x0e, 0x00, 0x00, 0x00, // body size
+			0x12, 0x00, 0x00, 0x00, // body size
 			0x54, 0x45, 0x53, 0x54, // type (TEST)
 			0x45, 0x4e, 0x54, 0x31, // id (ENT1)
 			0x06, 0x00, 0x00, 0x00, // body size
@@ -404,7 +404,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 		// check contents
 		expected := []byte{
 			0x52, 0x49, 0x46, 0x46, // id (RIFF)
-			0x19, 0x00, 0x00, 0x00, // body size
+			0x1D, 0x00, 0x00, 0x00, // body size
 			0x54, 0x45, 0x53, 0x54, // type (TEST)
 			0x45, 0x4e, 0x54, 0x31, // id (ENT1)
 			0x06, 0x00, 0x00, 0x00, // body size
@@ -490,7 +490,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s := crc32.ChecksumIEEE(got); s != 1717141340 {
+		if s := crc32.ChecksumIEEE(got); s != 1953840023 {
 			t.Errorf("unexpected check sum: %d", s)
 			t.Log(hex.Dump(got))
 		}
@@ -559,7 +559,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s := crc32.ChecksumIEEE(got); s != 1589510010 {
+		if s := crc32.ChecksumIEEE(got); s != 1759927271 {
 			t.Errorf("unexpected check sum: %d", s)
 			t.Log(hex.Dump(got))
 		}
@@ -599,7 +599,7 @@ func ExampleCompletedChunkWriter_Write() {
 	}
 
 	// Output:
-	// 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
+	// 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
 }
 
 func ExampleIncompleteChunkWriter_Write() {

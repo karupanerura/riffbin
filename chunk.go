@@ -52,6 +52,7 @@ func (c *RIFFChunk) HeaderSize() uint32 {
 }
 
 func (c *RIFFChunk) BodySize() (size uint32) {
+	size = 4 // for form type size
 	for _, p := range c.Payload {
 		size += p.HeaderSize() + p.BodySize()
 	}
@@ -83,6 +84,7 @@ func (c *ListChunk) HeaderSize() uint32 {
 }
 
 func (c *ListChunk) BodySize() (size uint32) {
+	size = 4 // for form type size
 	for _, p := range c.Payload {
 		size += p.HeaderSize() + p.BodySize()
 	}
