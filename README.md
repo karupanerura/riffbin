@@ -27,7 +27,7 @@ _, err := riffbin.NewCompletedChunkWriter(w).Write(&riffbin.RIFFChunk{
 				0x01, 0x00, // Compression Code (Linear PCM)
 				0x01, 0x00, // Number of channels (Monoral)
 				0x44, 0xAC, 0x00, 0x00, // Sample rate (44.1Hz)
-				0x10, 0xB1, 0x02, 0x00, // Average bytes per second (44.1Hz/Monoral)
+				0x44, 0xAC, 0x00, 0x00, // Average bytes per second (44.1Hz/Monoral)
 				0x01, 0x00, // Block align (8bit/Monoral)
 				0x08, 0x00, // Significant bits per sample (8bit)
 			},
@@ -58,7 +58,7 @@ _, err = w.Write(&riffbin.RIFFChunk{
 				0x01, 0x00, // Compression Code (Linear PCM)
 				0x01, 0x00, // Number of channels (Monoral)
 				0x44, 0xAC, 0x00, 0x00, // Sample rate (44.1Hz)
-				0x10, 0xB1, 0x02, 0x00, // Average bytes per second (44.1Hz/Monoral)
+				0x44, 0xAC, 0x00, 0x00, // Average bytes per second (44.1Hz/Monoral)
 				0x01, 0x00, // Block align (8bit/Monoral)
 				0x08, 0x00, // Significant bits per sample (8bit)
 			},
