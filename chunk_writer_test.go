@@ -171,7 +171,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 		if n != int64(buf.Len()) {
 			t.Errorf("n should be %d but got %d", buf.Len(), n)
 		}
-		if s := c.Sum32(); s != 1953840023 {
+		if s := c.Sum32(); s != 3366069976 {
 			t.Errorf("unexpected check sum: %d", s)
 			t.Log(hex.Dump(buf.Bytes()))
 		}
@@ -490,7 +490,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s := crc32.ChecksumIEEE(got); s != 1953840023 {
+		if s := crc32.ChecksumIEEE(got); s != 3366069976 {
 			t.Errorf("unexpected check sum: %d", s)
 			t.Log(hex.Dump(got))
 		}

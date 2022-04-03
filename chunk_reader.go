@@ -13,20 +13,23 @@ var (
 )
 
 func ReadFull(r io.Reader) (*RIFFChunk, error) {
-	var buf [4]byte
+	var buf [HeaderBytes]byte
 
-	// read id and verify
-	if _, err := io.ReadFull(r, buf[:idBytes]); err == io.EOF || err == io.ErrUnexpectedEOF {
+	// read header
+	if _, err := io.ReadFull(r, buf[:]); err == io.EOF || err == io.ErrUnexpectedEOF {
 		return nil, ErrInvalidFormat
 	} else if err != nil {
 		return nil, err
 	}
+
+	// verify id
 	if !bytes.Equal(riffID[:], buf[:idBytes]) {
 		return nil, ErrInvalidFormat
 	}
 
 	ch := groupedChunkHeader{id: riffID}
-	chunk, err := readGroupedChunkAfterID(r, &ch)
+	rr := &io.LimitedReader{R: r, N: int64(binary.LittleEndian.Uint32(buf[idBytes:]))}
+	chunk, err := readGroupedChunkBody(rr, &ch)
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		return nil, ErrInvalidFormat
 	} else if err != nil {
@@ -69,35 +72,31 @@ func (h *groupedChunkHeader) toGroupedChunk(payload []Chunk) groupedChunk {
 	panic("should not reach here")
 }
 
-func readGroupedChunkAfterID(r io.Reader, chunk *groupedChunkHeader) (groupedChunk, error) {
-	var buf [4]byte
-
-	// read body length
-	if _, err := io.ReadFull(r, buf[:sizeBytes]); err != nil {
-		return nil, err
-	}
-	rr := &io.LimitedReader{R: r, N: int64(binary.LittleEndian.Uint32(buf[:]))}
+func readGroupedChunkBody(r *io.LimitedReader, chunk *groupedChunkHeader) (groupedChunk, error) {
+	var buf [HeaderBytes]byte
 
 	// read type
-	if _, err := io.ReadFull(rr, chunk.groupType[:typeBytes]); err != nil {
+	if _, err := io.ReadFull(r, chunk.groupType[:typeBytes]); err != nil {
 		return nil, err
 	}
-	if rr.N == 0 {
+	if r.N == 0 {
 		return chunk.toGroupedChunk([]Chunk{}), nil
 	}
 
 	// read sub-chunks
 	var payload []Chunk
-	for rr.N > 0 {
-		if _, err := io.ReadFull(rr, buf[:idBytes]); err != nil {
+	for r.N > 0 {
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
 			return nil, err
 		}
+		bodyLen := binary.LittleEndian.Uint32(buf[idBytes:])
 
 		// check wel-known id
 		if bytes.Equal(listID[:], buf[:idBytes]) || bytes.Equal(riffID[:], buf[:idBytes]) {
 			ch := groupedChunkHeader{}
+			rr := &io.LimitedReader{R: r, N: int64(bodyLen)}
 			copy(ch.id[:], buf[:idBytes])
-			chunk, err := readGroupedChunkAfterID(rr, &ch)
+			chunk, err := readGroupedChunkBody(rr, &ch)
 			if err != nil {
 				return nil, err
 			}
@@ -108,15 +107,9 @@ func readGroupedChunkAfterID(r io.Reader, chunk *groupedChunkHeader) (groupedChu
 			chunk := &CompletedSubChunk{}
 			copy(chunk.ID[:], buf[:idBytes])
 
-			// read body length
-			if _, err := io.ReadFull(rr, buf[:sizeBytes]); err != nil {
-				return nil, err
-			}
-			bodyLen := binary.LittleEndian.Uint32(buf[:])
-
 			// read body payload
 			chunk.Payload = make([]byte, bodyLen)
-			if _, err := io.ReadFull(rr, chunk.Payload); err != nil {
+			if _, err := io.ReadFull(r, chunk.Payload); err != nil {
 				return nil, err
 			}
 

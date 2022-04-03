@@ -11,6 +11,10 @@ const (
 	typeBytes = 4
 )
 
+const (
+	HeaderBytes = 8
+)
+
 var (
 	riffID = [idBytes]byte{'R', 'I', 'F', 'F'}
 	listID = [idBytes]byte{'L', 'I', 'S', 'T'}
@@ -20,9 +24,6 @@ var (
 type Chunk interface {
 	// ID is the chunk ID. this must be 4 byte and must not be modified.
 	ChunkID() []byte
-
-	// HeaderSize is byte lenght of the chunk header.
-	HeaderSize() uint32
 
 	// BodySize is byte lenght of the chunk body.
 	BodySize() uint32
@@ -47,14 +48,10 @@ func (c *RIFFChunk) ChunkID() []byte {
 	return riffID[:]
 }
 
-func (c *RIFFChunk) HeaderSize() uint32 {
-	return idBytes + sizeBytes + typeBytes
-}
-
 func (c *RIFFChunk) BodySize() (size uint32) {
-	size = 4 // for form type size
+	size = typeBytes
 	for _, p := range c.Payload {
-		size += p.HeaderSize() + p.BodySize()
+		size += HeaderBytes + p.BodySize()
 	}
 	return
 }
@@ -79,14 +76,10 @@ func (c *ListChunk) ChunkID() []byte {
 	return listID[:]
 }
 
-func (c *ListChunk) HeaderSize() uint32 {
-	return idBytes + sizeBytes + typeBytes
-}
-
 func (c *ListChunk) BodySize() (size uint32) {
-	size = 4 // for form type size
+	size = typeBytes
 	for _, p := range c.Payload {
-		size += p.HeaderSize() + p.BodySize()
+		size += HeaderBytes + p.BodySize()
 	}
 	return
 }
@@ -117,10 +110,6 @@ func (c *CompletedSubChunk) ChunkID() []byte {
 	return c.ID[:]
 }
 
-func (c *CompletedSubChunk) HeaderSize() uint32 {
-	return idBytes + sizeBytes
-}
-
 func (c *CompletedSubChunk) BodySize() uint32 {
 	return uint32(len(c.Payload))
 }
@@ -147,10 +136,6 @@ func NewIncompleteSubChunk(id [idBytes]byte, r io.Reader) *IncompleteSubChunk {
 
 func (c *IncompleteSubChunk) ChunkID() []byte {
 	return c.id[:]
-}
-
-func (c *IncompleteSubChunk) HeaderSize() uint32 {
-	return idBytes + sizeBytes
 }
 
 func (c *IncompleteSubChunk) BodySize() uint32 {

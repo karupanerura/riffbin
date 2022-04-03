@@ -10,19 +10,14 @@ import (
 )
 
 type basicChunk struct {
-	id         []byte
-	headerSize uint32
-	bodySize   uint32
+	id       []byte
+	bodySize uint32
 }
 
 var _ riffbin.Chunk = (*basicChunk)(nil)
 
 func (c *basicChunk) ChunkID() []byte {
 	return c.id
-}
-
-func (c *basicChunk) HeaderSize() uint32 {
-	return c.headerSize
 }
 
 func (c *basicChunk) BodySize() uint32 {
@@ -34,23 +29,18 @@ func TestRIFFChunk(t *testing.T) {
 		FormType: [4]byte{'A', 'B', 'C', 'D'},
 		Payload: []riffbin.Chunk{
 			&basicChunk{
-				id:         []byte("ENT1"),
-				headerSize: 8,
-				bodySize:   17,
+				id:       []byte("ENT1"),
+				bodySize: 17,
 			},
 			&basicChunk{
-				id:         []byte("ENT2"),
-				headerSize: 8,
-				bodySize:   11,
+				id:       []byte("ENT2"),
+				bodySize: 11,
 			},
 		},
 	}
 
 	if !bytes.Equal(chunk.ChunkID(), []byte("RIFF")) {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
-	}
-	if chunk.HeaderSize() != 12 {
-		t.Errorf("unexpected header size: %d", chunk.HeaderSize())
 	}
 	if chunk.BodySize() != 48 {
 		t.Errorf("unexpected body size: %d", chunk.BodySize())
@@ -62,23 +52,18 @@ func TestListChunk(t *testing.T) {
 		ListType: [4]byte{'A', 'B', 'C', 'D'},
 		Payload: []riffbin.Chunk{
 			&basicChunk{
-				id:         []byte("ENT1"),
-				headerSize: 8,
-				bodySize:   11,
+				id:       []byte("ENT1"),
+				bodySize: 11,
 			},
 			&basicChunk{
-				id:         []byte("ENT2"),
-				headerSize: 8,
-				bodySize:   17,
+				id:       []byte("ENT2"),
+				bodySize: 17,
 			},
 		},
 	}
 
 	if !bytes.Equal(chunk.ChunkID(), []byte("LIST")) {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
-	}
-	if chunk.HeaderSize() != 12 {
-		t.Errorf("unexpected header size: %d", chunk.HeaderSize())
 	}
 	if chunk.BodySize() != 48 {
 		t.Errorf("unexpected body size: %d", chunk.BodySize())
@@ -93,9 +78,6 @@ func TestCompletedSubChunk(t *testing.T) {
 
 	if !bytes.Equal(chunk.ChunkID(), []byte("ABCD")) {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
-	}
-	if chunk.HeaderSize() != 8 {
-		t.Errorf("unexpected header size: %d", chunk.HeaderSize())
 	}
 	if chunk.BodySize() != 6 {
 		t.Errorf("unexpected body size: %d", chunk.BodySize())
@@ -130,9 +112,6 @@ func TestIncompleteSubChunk(t *testing.T) {
 
 	if !bytes.Equal(chunk.ChunkID(), []byte("ABCD")) {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
-	}
-	if chunk.HeaderSize() != 8 {
-		t.Errorf("unexpected header size: %d", chunk.HeaderSize())
 	}
 	if chunk.BodySize() != 0 {
 		t.Errorf("unexpected body size: %d", chunk.BodySize())
