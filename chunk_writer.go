@@ -127,7 +127,7 @@ func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
 				return err
 			}
 		}
-	case subChunk:
+	case SubChunk:
 		*pos += int64(b)
 	}
 
@@ -205,13 +205,13 @@ func writeChunkBody(w io.Writer, c Chunk, allowIncomplete bool) (n int64, err er
 				return
 			}
 		}
-	case subChunk:
-		if !allowIncomplete && cc.incomplete() {
+	case SubChunk:
+		if !allowIncomplete && cc.Incomplete() {
 			err = ErrUnexpectedIncompleteChunk
 			return
 		}
 
-		n, err = io.Copy(w, cc.bodyReader())
+		n, err = io.Copy(w, cc)
 	default:
 		panic(fmt.Sprintf("unknown chunk type: %+v", c))
 	}

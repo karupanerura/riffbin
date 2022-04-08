@@ -3,6 +3,8 @@ package riffbin
 import (
 	"bytes"
 	"io"
+	"os"
+	"sync"
 )
 
 const (
@@ -92,19 +94,26 @@ func (c *ListChunk) payload() []Chunk {
 	return c.Payload
 }
 
-type subChunk interface {
+type SubChunk interface {
 	Chunk
-	incomplete() bool
-	bodyReader() io.Reader
+	io.Reader
+
+	// Incomplete returns true if the SubChunk payload is fluid, or not it returns false.
+	// Incomplete sub-chunk is only after the payload have been read that the BodySize is determined.
+	// Completed sub-chunk have a stable size of the payload.
+	Incomplete() bool
 }
 
 // OnMemorySubChunk is a sub-chunk with the payload on memory.
 type OnMemorySubChunk struct {
 	ID      [idBytes]byte
 	Payload []byte
+
+	once sync.Once
+	r    *bytes.Reader
 }
 
-var _ subChunk = (*OnMemorySubChunk)(nil)
+var _ SubChunk = (*OnMemorySubChunk)(nil)
 
 func (c *OnMemorySubChunk) ChunkID() []byte {
 	return c.ID[:]
@@ -114,24 +123,34 @@ func (c *OnMemorySubChunk) BodySize() uint32 {
 	return uint32(len(c.Payload))
 }
 
-func (c *OnMemorySubChunk) incomplete() bool {
+func (c *OnMemorySubChunk) Incomplete() bool {
 	return false
 }
 
-func (c *OnMemorySubChunk) bodyReader() io.Reader {
-	return bytes.NewReader(c.Payload)
+func (c *OnMemorySubChunk) Read(p []byte) (int, error) {
+	c.once.Do(func() {
+		c.r = bytes.NewReader(c.Payload)
+	})
+	return c.r.Read(p)
 }
 
-// IncompleteSubChunk is a stream sub-chunk.
+func (c *OnMemorySubChunk) WriteTo(w io.Writer) (int64, error) {
+	c.once.Do(func() {
+		c.r = bytes.NewReader(c.Payload)
+	})
+	return c.r.WriteTo(w)
+}
+
+// IncompleteSubChunk is a sub-chunk with the incomplete payload provided from io.Reader.
 type IncompleteSubChunk struct {
-	id   [idBytes]byte
-	body *incompleteChunkBody
+	id [idBytes]byte
+	incompleteChunkBody
 }
 
-var _ subChunk = (*IncompleteSubChunk)(nil)
+var _ SubChunk = (*IncompleteSubChunk)(nil)
 
 func NewIncompleteSubChunk(id [idBytes]byte, r io.Reader) *IncompleteSubChunk {
-	return &IncompleteSubChunk{id: id, body: &incompleteChunkBody{reader: r}}
+	return &IncompleteSubChunk{id, incompleteChunkBody{reader: r}}
 }
 
 func (c *IncompleteSubChunk) ChunkID() []byte {
@@ -139,15 +158,11 @@ func (c *IncompleteSubChunk) ChunkID() []byte {
 }
 
 func (c *IncompleteSubChunk) BodySize() uint32 {
-	return c.body.writtenLength
+	return c.writtenLength
 }
 
-func (c *IncompleteSubChunk) incomplete() bool {
+func (c *IncompleteSubChunk) Incomplete() bool {
 	return true
-}
-
-func (c *IncompleteSubChunk) bodyReader() io.Reader {
-	return c.body
 }
 
 type incompleteChunkBody struct {

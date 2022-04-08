@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/karupanerura/riffbin"
 )
 
@@ -107,7 +108,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 			t.Parallel()
 			if got, err := riffbin.ReadFull(&buf); err != nil {
 				t.Fatal(err)
-			} else if df := cmp.Diff(got, riffChunk); df != "" {
+			} else if df := cmp.Diff(got, riffChunk, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
 				t.Error(df)
 			}
 		})
@@ -198,7 +199,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 			t.Parallel()
 			if got, err := riffbin.ReadFull(&buf); err != nil {
 				t.Fatal(err)
-			} else if df := cmp.Diff(got, riffChunk); df != "" {
+			} else if df := cmp.Diff(got, riffChunk, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
 				t.Error(df)
 			}
 		})
@@ -245,7 +246,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 			t.Parallel()
 			if got, err := riffbin.ReadFull(&buf); err != nil {
 				t.Fatal(err)
-			} else if df := cmp.Diff(got, riffChunk); df != "" {
+			} else if df := cmp.Diff(got, riffChunk, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
 				t.Error(df)
 			}
 		})

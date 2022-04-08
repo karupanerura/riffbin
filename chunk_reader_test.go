@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/karupanerura/riffbin"
 )
 
@@ -46,7 +47,7 @@ func TestReadFull(t *testing.T) {
 				},
 			}
 
-			if df := cmp.Diff(riffChunk, expected); df != "" {
+			if df := cmp.Diff(riffChunk, expected, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
 				t.Errorf("diff = %s", df)
 			}
 		})
@@ -63,7 +64,7 @@ func TestReadFull(t *testing.T) {
 				Payload:  []riffbin.Chunk{},
 			}
 
-			if df := cmp.Diff(riffChunk, expected); df != "" {
+			if df := cmp.Diff(riffChunk, expected, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
 				t.Errorf("diff = %s", df)
 			}
 		})
@@ -85,7 +86,7 @@ func TestReadFull(t *testing.T) {
 				},
 			}
 
-			if df := cmp.Diff(riffChunk, expected); df != "" {
+			if df := cmp.Diff(riffChunk, expected, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
 				t.Errorf("diff = %s", df)
 			}
 		})
@@ -107,7 +108,7 @@ func TestReadFull(t *testing.T) {
 				},
 			}
 
-			if df := cmp.Diff(riffChunk, expected); df != "" {
+			if df := cmp.Diff(riffChunk, expected, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
 				t.Errorf("diff = %s", df)
 			}
 		})
