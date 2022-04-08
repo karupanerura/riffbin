@@ -22,7 +22,7 @@ var (
 
 // Chunk is a chunk of RIFF spec
 type Chunk interface {
-	// ID is the chunk ID. this must be 4 byte and must not be modified.
+	// ChunkID is the chunk ID. this must be 4 byte and must not be modified.
 	ChunkID() []byte
 
 	// BodySize is byte lenght of the chunk body.
