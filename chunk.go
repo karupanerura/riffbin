@@ -181,3 +181,43 @@ func (c *incompleteChunkBody) WriteTo(w io.Writer) (n int64, err error) {
 	c.writtenLength += uint32(n)
 	return
 }
+
+// FileSubChunk is a sub-chunk with the payload on *os.File.
+type FileSubChunk struct {
+	ID   [idBytes]byte
+	Size uint32
+	File *os.File
+
+	once sync.Once
+	r    *io.LimitedReader
+}
+
+var _ SubChunk = (*FileSubChunk)(nil)
+
+func (c *FileSubChunk) ChunkID() []byte {
+	return c.ID[:]
+}
+
+func (c *FileSubChunk) BodySize() uint32 {
+	return c.Size
+}
+
+func (c *FileSubChunk) Read(p []byte) (n int, err error) {
+	c.once.Do(func() {
+		c.r = &io.LimitedReader{R: c.File, N: int64(c.Size)}
+	})
+	return c.r.Read(p)
+}
+
+func (c *FileSubChunk) Incomplete() bool {
+	return false
+}
+
+func (c *FileSubChunk) ReadAll() (*OnMemorySubChunk, error) {
+	payload, err := io.ReadAll(c)
+	if err != nil {
+		return nil, err
+	}
+
+	return &OnMemorySubChunk{ID: c.ID, Payload: payload}, nil
+}
