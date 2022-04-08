@@ -12,8 +12,11 @@ import (
 )
 
 func TestReadFull(t *testing.T) {
+	t.Parallel()
 	t.Run("Valid", func(t *testing.T) {
+		t.Parallel()
 		t.Run("Wave", func(t *testing.T) {
+			t.Parallel()
 			const binary = "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"
 			decoder := base64.NewDecoder(base64.StdEncoding, strings.NewReader(binary))
 			riffChunk, err := riffbin.ReadFull(decoder)
@@ -49,6 +52,7 @@ func TestReadFull(t *testing.T) {
 		})
 
 		t.Run("EmptyPayload", func(t *testing.T) {
+			t.Parallel()
 			riffChunk, err := riffbin.ReadFull(bytes.NewReader([]byte{'R', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D'}))
 			if err != nil {
 				t.Fatal(err)
@@ -65,6 +69,7 @@ func TestReadFull(t *testing.T) {
 		})
 
 		t.Run("EmptyListChunk", func(t *testing.T) {
+			t.Parallel()
 			riffChunk, err := riffbin.ReadFull(bytes.NewReader([]byte{'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'L', 'I', 'S', 'T', 0x04, 0x00, 0x00, 0x00, 'E', 'F', 'G', 'H'}))
 			if err != nil {
 				t.Fatal(err)
@@ -86,6 +91,7 @@ func TestReadFull(t *testing.T) {
 		})
 
 		t.Run("EmptySubChunk", func(t *testing.T) {
+			t.Parallel()
 			riffChunk, err := riffbin.ReadFull(bytes.NewReader([]byte{'R', 'I', 'F', 'F', 0x0C, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x00, 0x00, 0x00, 0x00}))
 			if err != nil {
 				t.Fatal(err)
@@ -108,6 +114,7 @@ func TestReadFull(t *testing.T) {
 	})
 
 	t.Run("InvalidFormat", func(t *testing.T) {
+		t.Parallel()
 		for _, tt := range []struct {
 			Name  string
 			Bytes []byte
@@ -126,6 +133,7 @@ func TestReadFull(t *testing.T) {
 		} {
 			tt := tt
 			t.Run(tt.Name, func(t *testing.T) {
+				t.Parallel()
 				c, err := riffbin.ReadFull(bytes.NewReader(tt.Bytes))
 				if err != riffbin.ErrInvalidFormat {
 					t.Errorf("unexpected error: %v", err)

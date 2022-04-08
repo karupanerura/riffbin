@@ -68,7 +68,9 @@ func (w *pureWriteSeeker) Seek(offset int64, whence int) (int64, error) {
 }
 
 func TestCompletedChunkWriter(t *testing.T) {
+	t.Parallel()
 	t.Run("Basic", func(t *testing.T) {
+		t.Parallel()
 		riffChunk := &riffbin.RIFFChunk{
 			FormType: [4]byte{'T', 'E', 'S', 'T'},
 			Payload: []riffbin.Chunk{
@@ -102,6 +104,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 		}
 
 		t.Run("ReadFull", func(t *testing.T) {
+			t.Parallel()
 			if got, err := riffbin.ReadFull(&buf); err != nil {
 				t.Fatal(err)
 			} else if df := cmp.Diff(got, riffChunk); df != "" {
@@ -111,6 +114,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 	})
 
 	t.Run("UnexpectedIncompleteError", func(t *testing.T) {
+		t.Parallel()
 		n, err := riffbin.NewCompletedChunkWriter(io.Discard).Write(&riffbin.RIFFChunk{
 			FormType: [4]byte{'T', 'E', 'S', 'T'},
 			Payload: []riffbin.Chunk{
@@ -126,6 +130,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 	})
 
 	t.Run("Complex", func(t *testing.T) {
+		t.Parallel()
 		riffChunk := &riffbin.RIFFChunk{
 			FormType: [4]byte{'T', 'E', 'S', 'T'},
 			Payload: []riffbin.Chunk{
@@ -190,6 +195,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 		}
 
 		t.Run("ReadFull", func(t *testing.T) {
+			t.Parallel()
 			if got, err := riffbin.ReadFull(&buf); err != nil {
 				t.Fatal(err)
 			} else if df := cmp.Diff(got, riffChunk); df != "" {
@@ -199,6 +205,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 	})
 
 	t.Run("Wave", func(t *testing.T) {
+		t.Parallel()
 		riffChunk := &riffbin.RIFFChunk{
 			FormType: [4]byte{'W', 'A', 'V', 'E'},
 			Payload: []riffbin.Chunk{
@@ -235,6 +242,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 		}
 
 		t.Run("ReadFull", func(t *testing.T) {
+			t.Parallel()
 			if got, err := riffbin.ReadFull(&buf); err != nil {
 				t.Fatal(err)
 			} else if df := cmp.Diff(got, riffChunk); df != "" {
@@ -244,6 +252,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 	})
 
 	t.Run("IOError", func(t *testing.T) {
+		t.Parallel()
 		riffChunk := &riffbin.RIFFChunk{
 			FormType: [4]byte{'W', 'A', 'V', 'E'},
 			Payload: []riffbin.Chunk{
@@ -278,7 +287,9 @@ func TestCompletedChunkWriter(t *testing.T) {
 }
 
 func TestInompletedChunkWriter(t *testing.T) {
+	t.Parallel()
 	t.Run("Basic", func(t *testing.T) {
+		t.Parallel()
 		f, err := os.CreateTemp("", "riffbin")
 		if err != nil {
 			t.Fatal(err)
@@ -337,6 +348,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 	})
 
 	t.Run("Seek", func(t *testing.T) {
+		t.Parallel()
 		f, err := os.CreateTemp("", "riffbin")
 		if err != nil {
 			t.Fatal(err)
@@ -395,6 +407,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 	})
 
 	t.Run("Mixed", func(t *testing.T) {
+		t.Parallel()
 		f, err := os.CreateTemp("", "riffbin")
 		if err != nil {
 			t.Fatal(err)
@@ -453,6 +466,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 	})
 
 	t.Run("ComplexMixed", func(t *testing.T) {
+		t.Parallel()
 		f, err := os.CreateTemp("", "riffbin")
 		if err != nil {
 			t.Fatal(err)
@@ -528,6 +542,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 	})
 
 	t.Run("Wave", func(t *testing.T) {
+		t.Parallel()
 		f, err := os.CreateTemp("", "riffbin")
 		if err != nil {
 			t.Fatal(err)
