@@ -98,27 +98,27 @@ type subChunk interface {
 	bodyReader() io.Reader
 }
 
-// CompletedSubChunk is a fixed size sub-chunk.
-type CompletedSubChunk struct {
+// OnMemorySubChunk is a sub-chunk with the payload on memory.
+type OnMemorySubChunk struct {
 	ID      [idBytes]byte
 	Payload []byte
 }
 
-var _ subChunk = (*CompletedSubChunk)(nil)
+var _ subChunk = (*OnMemorySubChunk)(nil)
 
-func (c *CompletedSubChunk) ChunkID() []byte {
+func (c *OnMemorySubChunk) ChunkID() []byte {
 	return c.ID[:]
 }
 
-func (c *CompletedSubChunk) BodySize() uint32 {
+func (c *OnMemorySubChunk) BodySize() uint32 {
 	return uint32(len(c.Payload))
 }
 
-func (c *CompletedSubChunk) incomplete() bool {
+func (c *OnMemorySubChunk) incomplete() bool {
 	return false
 }
 
-func (c *CompletedSubChunk) bodyReader() io.Reader {
+func (c *OnMemorySubChunk) bodyReader() io.Reader {
 	return bytes.NewReader(c.Payload)
 }
 

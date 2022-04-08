@@ -71,7 +71,7 @@ func TestListChunk(t *testing.T) {
 }
 
 func TestCompletedSubChunk(t *testing.T) {
-	chunk := riffbin.CompletedSubChunk{
+	chunk := riffbin.OnMemorySubChunk{
 		ID:      [4]byte{'A', 'B', 'C', 'D'},
 		Payload: []byte("foobar"),
 	}

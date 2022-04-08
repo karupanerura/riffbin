@@ -47,7 +47,7 @@ func dumpChunk(chunk riffbin.Chunk, level int) {
 			dumpChunk(cc, level+1)
 		}
 		return
-	case *riffbin.CompletedSubChunk:
+	case *riffbin.OnMemorySubChunk:
 		fmt.Printf("%s[%d]\n", c.ID, c.BodySize())
 		io.WriteString(os.Stdout, indent)
 		io.WriteString(os.Stdout, indent)

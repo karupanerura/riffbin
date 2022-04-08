@@ -12,6 +12,8 @@ var (
 	ErrInvalidFormat = errors.New("invlaid format")
 )
 
+// ReadFull reads RIFF binary from io.Reader.
+// It creates *RIFFChunk with *OnMemorySubChunk for sub-chunks.
 func ReadFull(r io.Reader) (*RIFFChunk, error) {
 	var buf [HeaderBytes]byte
 
@@ -104,7 +106,7 @@ func readGroupedChunkBody(r *io.LimitedReader, chunk *groupedChunkHeader) (group
 			payload = append(payload, chunk)
 		} else {
 			// or not, this is a simple sub-chunk
-			chunk := &CompletedSubChunk{}
+			chunk := &OnMemorySubChunk{}
 			copy(chunk.ID[:], buf[:idBytes])
 
 			// read body payload
