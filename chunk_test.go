@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/karupanerura/riffbin"
@@ -12,6 +13,9 @@ import (
 type basicChunk struct {
 	id       []byte
 	bodySize uint32
+
+	once sync.Once
+	r    io.Reader
 }
 
 var _ riffbin.Chunk = (*basicChunk)(nil)
@@ -24,19 +28,22 @@ func (c *basicChunk) BodySize() uint32 {
 	return c.bodySize
 }
 
+func (c *basicChunk) Incomplete() bool {
+	return false
+}
+
 func TestRIFFChunk(t *testing.T) {
+	ent1 := &basicChunk{
+		id:       []byte("ENT1"),
+		bodySize: 17,
+	}
+	ent2 := &basicChunk{
+		id:       []byte("ENT2"),
+		bodySize: 11,
+	}
 	chunk := riffbin.RIFFChunk{
 		FormType: [4]byte{'A', 'B', 'C', 'D'},
-		Payload: []riffbin.Chunk{
-			&basicChunk{
-				id:       []byte("ENT1"),
-				bodySize: 17,
-			},
-			&basicChunk{
-				id:       []byte("ENT2"),
-				bodySize: 11,
-			},
-		},
+		Payload:  []riffbin.Chunk{ent1, ent2},
 	}
 
 	if !bytes.Equal(chunk.ChunkID(), []byte("RIFF")) {

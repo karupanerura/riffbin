@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"strings"
 )
 
 var (
@@ -15,16 +13,21 @@ var (
 	ErrInvalidFormat = errors.New("invlaid format")
 )
 
+type PartialReader interface {
+	io.ReadSeeker
+	io.ReaderAt
+}
+
 // ReadFull reads RIFF binary from io.Reader.
 // It creates *RIFFChunk with *OnMemorySubChunk for sub-chunks.
 func ReadFull(r io.Reader) (*RIFFChunk, error) {
 	return read(r, createOnMemorySubChunk)
 }
 
-// ReadFile reads RIFF binary from *os.File to use less memory than ReadFull.
-// It creates *RIFFChunk with *FileSubChunk for sub-chunks.
-func ReadFile(f *os.File) (*RIFFChunk, error) {
-	return read(f, createFileSubChunk)
+// ReadSections reads RIFF binary from io.ReadSeeker to use less memory than ReadFull.
+// It creates *RIFFChunk with *InStreamSubChunk for sub-chunks.
+func ReadSections(r PartialReader) (*RIFFChunk, error) {
+	return read(r, createInStreamSubChunk)
 }
 
 func read(r io.Reader, f subChunkConstructorFn) (*RIFFChunk, error) {
@@ -44,7 +47,7 @@ func read(r io.Reader, f subChunkConstructorFn) (*RIFFChunk, error) {
 
 	ch := groupedChunkHeader{id: riffID}
 	rr := &io.LimitedReader{R: r, N: int64(binary.LittleEndian.Uint32(buf[idBytes:]))}
-	chunk, err := readGroupedChunkBody(rr, &ch, f)
+	chunk, err := readGroupedChunkBody(r, rr, &ch, f)
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, ErrInvalidFormat
 	} else if err != nil {
@@ -87,7 +90,7 @@ func (h *groupedChunkHeader) toGroupedChunk(payload []Chunk) groupedChunk {
 	panic("should not reach here")
 }
 
-func readGroupedChunkBody(r *io.LimitedReader, chunk *groupedChunkHeader, f subChunkConstructorFn) (groupedChunk, error) {
+func readGroupedChunkBody(src io.Reader, r *io.LimitedReader, chunk *groupedChunkHeader, f subChunkConstructorFn) (groupedChunk, error) {
 	var buf [HeaderBytes]byte
 
 	// read type
@@ -111,7 +114,7 @@ func readGroupedChunkBody(r *io.LimitedReader, chunk *groupedChunkHeader, f subC
 			ch := groupedChunkHeader{}
 			rr := &io.LimitedReader{R: r, N: int64(bodyLen)}
 			copy(ch.id[:], buf[:idBytes])
-			chunk, err := readGroupedChunkBody(rr, &ch, f)
+			chunk, err := readGroupedChunkBody(src, rr, &ch, f)
 			if err != nil {
 				return nil, err
 			}
@@ -119,7 +122,7 @@ func readGroupedChunkBody(r *io.LimitedReader, chunk *groupedChunkHeader, f subC
 			payload = append(payload, chunk)
 		} else {
 			// or not, this is a simple sub-chunk
-			chunk, err := f(buf[:idBytes], bodyLen, r)
+			chunk, err := f(src, r, buf[:idBytes], bodyLen)
 			if err != nil {
 				return nil, fmt.Errorf("construct sub-chunk: %w", err)
 			}
@@ -131,9 +134,9 @@ func readGroupedChunkBody(r *io.LimitedReader, chunk *groupedChunkHeader, f subC
 	return chunk.toGroupedChunk(payload), nil
 }
 
-type subChunkConstructorFn = func(id []byte, bodyLen uint32, r *io.LimitedReader) (SubChunk, error)
+type subChunkConstructorFn = func(src io.Reader, r *io.LimitedReader, id []byte, bodyLen uint32) (SubChunk, error)
 
-func createOnMemorySubChunk(id []byte, bodyLen uint32, r *io.LimitedReader) (SubChunk, error) {
+func createOnMemorySubChunk(_ io.Reader, r *io.LimitedReader, id []byte, bodyLen uint32) (SubChunk, error) {
 	chunk := &OnMemorySubChunk{}
 	copy(chunk.ID[:], id)
 
@@ -146,80 +149,23 @@ func createOnMemorySubChunk(id []byte, bodyLen uint32, r *io.LimitedReader) (Sub
 	return chunk, nil
 }
 
-func createFileSubChunk(id []byte, bodyLen uint32, r *io.LimitedReader) (SubChunk, error) {
-	// get source file object
-	rr := r.R
-	for {
-		if lr, ok := rr.(*io.LimitedReader); ok {
-			rr = lr.R
-		} else if rs, ok := rr.(*os.File); ok {
-			rr = rs
-			break
-		} else {
-			panic("unexpected sequence")
-		}
-	}
-	src := rr.(*os.File)
+func createInStreamSubChunk(src io.Reader, r *io.LimitedReader, id []byte, bodyLen uint32) (SubChunk, error) {
+	pr := src.(PartialReader)
 
-	// re-open file to emulate dup(2)
-	f, err := os.Open(src.Name())
+	// get seek position
+	pos, err := pr.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return nil, fmt.Errorf("re-open File %s: %w", src.Name(), err)
-	}
-
-	// copy seek position
-	if pos, err := src.Seek(0, io.SeekCurrent); err != nil {
 		return nil, fmt.Errorf("get seek position: %w", err)
-	} else {
-		_, err = f.Seek(pos, io.SeekStart)
-		if err != nil {
-			return nil, fmt.Errorf("seek: %w", err)
-		}
 	}
 
-	// skip seek position to next chunk
-	if _, err := src.Seek(int64(bodyLen), io.SeekCurrent); err != nil {
+	// skip sub-chunk body
+	_, err = pr.Seek(int64(bodyLen), io.SeekCurrent)
+	if err != nil {
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 	r.N -= int64(bodyLen)
 
-	chunk := &FileSubChunk{Size: bodyLen, File: f}
+	chunk := &InStreamSubChunk{SectionReader: io.NewSectionReader(pr, pos, int64(bodyLen))}
 	copy(chunk.ID[:], id)
 	return chunk, nil
-}
-
-func CloseAllIncludedFileSubChunkFiles(chunk Chunk) error {
-	switch c := chunk.(type) {
-	case groupedChunk:
-		var mErr multiError
-		for _, chunk := range c.payload() {
-			err := CloseAllIncludedFileSubChunkFiles(chunk)
-			if err != nil {
-				mErr = append(mErr, err)
-			}
-		}
-
-		if len(mErr) == 0 {
-			return nil
-		}
-		return mErr
-	case *FileSubChunk:
-		return c.File.Close()
-	default:
-		return nil
-	}
-}
-
-type multiError []error
-
-func (e multiError) Error() string {
-	b := strings.Builder{}
-	for i, err := range e {
-		if i != 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(err.Error())
-	}
-
-	return b.String()
 }

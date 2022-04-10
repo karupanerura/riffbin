@@ -3,7 +3,6 @@ package riffbin
 import (
 	"bytes"
 	"io"
-	"os"
 	"sync"
 )
 
@@ -27,7 +26,7 @@ type Chunk interface {
 	// ChunkID is the chunk ID. this must be 4 byte and must not be modified.
 	ChunkID() []byte
 
-	// BodySize is byte lenght of the chunk body.
+	// BodySize is byte length of the chunk body.
 	BodySize() uint32
 }
 
@@ -182,42 +181,22 @@ func (c *incompleteChunkBody) WriteTo(w io.Writer) (n int64, err error) {
 	return
 }
 
-// FileSubChunk is a sub-chunk with the payload on *os.File.
-type FileSubChunk struct {
-	ID   [idBytes]byte
-	Size uint32
-	File *os.File
-
-	once sync.Once
-	r    *io.LimitedReader
+// InStreamSubChunk is a sub-chunk with the payload on io.SeekReader
+type InStreamSubChunk struct {
+	ID [idBytes]byte
+	*io.SectionReader
 }
 
-var _ SubChunk = (*FileSubChunk)(nil)
+var _ SubChunk = (*InStreamSubChunk)(nil)
 
-func (c *FileSubChunk) ChunkID() []byte {
+func (c *InStreamSubChunk) ChunkID() []byte {
 	return c.ID[:]
 }
 
-func (c *FileSubChunk) BodySize() uint32 {
-	return c.Size
+func (c *InStreamSubChunk) BodySize() uint32 {
+	return uint32(c.SectionReader.Size())
 }
 
-func (c *FileSubChunk) Read(p []byte) (n int, err error) {
-	c.once.Do(func() {
-		c.r = &io.LimitedReader{R: c.File, N: int64(c.Size)}
-	})
-	return c.r.Read(p)
-}
-
-func (c *FileSubChunk) Incomplete() bool {
+func (c *InStreamSubChunk) Incomplete() bool {
 	return false
-}
-
-func (c *FileSubChunk) ReadAll() (*OnMemorySubChunk, error) {
-	payload, err := io.ReadAll(c)
-	if err != nil {
-		return nil, err
-	}
-
-	return &OnMemorySubChunk{ID: c.ID, Payload: payload}, nil
 }
