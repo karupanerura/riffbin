@@ -22,7 +22,7 @@ func main() {
 	}
 	defer f.Close()
 
-	riffChunk, err := riffbin.ReadFull(f)
+	riffChunk, err := riffbin.ReadSections(f)
 	if err != nil {
 		pos, _ := f.Seek(0, io.SeekCurrent)
 		log.Fatalf("%s: %s at %d", err.Error(), os.Args[1], pos)
