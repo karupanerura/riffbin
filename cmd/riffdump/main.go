@@ -47,13 +47,13 @@ func dumpChunk(chunk riffbin.Chunk, level int) {
 			dumpChunk(cc, level+1)
 		}
 		return
-	case *riffbin.OnMemorySubChunk:
-		fmt.Printf("%s[%d]\n", c.ID, c.BodySize())
+	case riffbin.SubChunk:
+		fmt.Printf("%s[%d]\n", c.ChunkID(), c.BodySize())
 		io.WriteString(os.Stdout, indent)
 		io.WriteString(os.Stdout, indent)
 		replacer := strings.NewReplacer("\n", "\n"+indent+indent)
 		dumper := hex.Dumper(&replacerWriter{w: os.Stdout, replacer: replacer})
-		dumper.Write(c.Payload)
+		_, _ = io.Copy(dumper, c)
 		dumper.Close()
 		os.Stdout.Write([]byte{'\n'})
 		return
