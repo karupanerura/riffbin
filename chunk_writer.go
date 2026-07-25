@@ -128,11 +128,13 @@ func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
 			}
 		}
 	case SubChunk:
-		*pos += int64(b)
+		*pos += int64(b) + int64(b&1) // skip the padding byte after an odd-sized body
 	}
 
 	return nil
 }
+
+var paddingByte = [1]byte{0x00}
 
 func writeChunk(w io.Writer, c Chunk, allowIncomplete bool) (n int64, err error) {
 	n, err = writeChunkHeader(w, c)
@@ -147,6 +149,19 @@ func writeChunk(w io.Writer, c Chunk, allowIncomplete bool) (n int64, err error)
 	if err != nil {
 		err = fmt.Errorf("chunk[%q] body: %w", string(c.ChunkID()), err)
 		return
+	}
+
+	// RIFF word alignment: an odd-sized chunk body is followed by a padding byte.
+	// The padding is not counted in the chunk's own size, but is counted in the parent's size.
+	// Grouped chunks are always even-sized because their children are padded.
+	if nn%2 == 1 {
+		var pn int
+		pn, err = w.Write(paddingByte[:])
+		n += int64(pn)
+		if err != nil {
+			err = fmt.Errorf("chunk[%q] padding: %w", string(c.ChunkID()), err)
+			return
+		}
 	}
 
 	return
