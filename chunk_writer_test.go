@@ -190,7 +190,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 		if n != int64(buf.Len()) {
 			t.Errorf("n should be %d but got %d", buf.Len(), n)
 		}
-		if s := c.Sum32(); s != 3366069976 {
+		if s := c.Sum32(); s != 1823101424 {
 			t.Errorf("unexpected check sum: %d", s)
 			t.Log(hex.Dump(buf.Bytes()))
 		}
@@ -448,7 +448,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 		// check contents
 		expected := []byte{
 			0x52, 0x49, 0x46, 0x46, // id (RIFF)
-			0x1D, 0x00, 0x00, 0x00, // body size
+			0x1E, 0x00, 0x00, 0x00, // body size
 			0x54, 0x45, 0x53, 0x54, // type (TEST)
 			0x45, 0x4e, 0x54, 0x31, // id (ENT1)
 			0x06, 0x00, 0x00, 0x00, // body size
@@ -456,6 +456,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 			0x45, 0x4e, 0x54, 0x32, // id (ENT2)
 			0x03, 0x00, 0x00, 0x00, // body size
 			0x66, 0x6f, 0x6f, // "foo"
+			0x00, // padding
 		}
 		if got, err := os.ReadFile(f.Name()); err != nil {
 			t.Fatal(err)
@@ -535,7 +536,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s := crc32.ChecksumIEEE(got); s != 3366069976 {
+		if s := crc32.ChecksumIEEE(got); s != 1823101424 {
 			t.Errorf("unexpected check sum: %d", s)
 			t.Log(hex.Dump(got))
 		}

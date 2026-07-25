@@ -54,10 +54,17 @@ func read(r io.Reader, f subChunkConstructorFn) (*RIFFChunk, error) {
 		return nil, err
 	}
 
-	// verify EOF
-	if n, err := r.Read(buf[:1]); err == nil {
-		// too long payload (too small payload size)
-		return nil, ErrInvalidFormat
+	// verify EOF (tolerate a single 0x00 after an odd-sized final chunk: some writers
+	// append the alignment padding byte without counting it in the RIFF chunk size)
+	if n, err := r.Read(buf[:1]); err == nil || (n == 1 && err == io.EOF) {
+		if n != 1 || buf[0] != 0x00 {
+			// too long payload (too small payload size)
+			return nil, ErrInvalidFormat
+		}
+		if n, err = r.Read(buf[:1]); n != 0 || err != io.EOF {
+			// too long payload (too small payload size)
+			return nil, ErrInvalidFormat
+		}
 	} else if n == 0 && err == io.EOF {
 		// OK
 	} else {
@@ -103,10 +110,12 @@ func readGroupedChunkBody(src io.Reader, r *io.LimitedReader, chunk *groupedChun
 
 	// read sub-chunks
 	var payload []Chunk
-	for r.N > 0 {
-		if _, err := io.ReadFull(r, buf[:]); err != nil {
+	pending := 0 // bytes of buf already holding the head of the next chunk header
+	for r.N > 0 || pending > 0 {
+		if _, err := io.ReadFull(r, buf[pending:]); err != nil {
 			return nil, err
 		}
+		pending = 0
 		bodyLen := binary.LittleEndian.Uint32(buf[idBytes:])
 
 		// check wel-known id
@@ -128,6 +137,19 @@ func readGroupedChunkBody(src io.Reader, r *io.LimitedReader, chunk *groupedChun
 			}
 
 			payload = append(payload, chunk)
+		}
+
+		// RIFF word alignment: an odd-sized chunk is followed by a padding byte.
+		// Files written by riffbin up to v0.0.6 lack the padding, so consume the next
+		// byte only when it is 0x00; chunk IDs are printable ASCII, so a non-zero byte
+		// must be the head of the next chunk header instead.
+		if bodyLen%2 == 1 && r.N > 0 {
+			if _, err := io.ReadFull(r, buf[:1]); err != nil {
+				return nil, err
+			}
+			if buf[0] != 0x00 {
+				pending = 1
+			}
 		}
 	}
 

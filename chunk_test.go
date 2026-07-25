@@ -49,7 +49,8 @@ func TestRIFFChunk(t *testing.T) {
 	if !bytes.Equal(chunk.ChunkID(), []byte("RIFF")) {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
 	}
-	if chunk.BodySize() != 48 {
+	// 4 (form type) + 8 + 17 + 1 (padding) + 8 + 11 + 1 (padding)
+	if chunk.BodySize() != 50 {
 		t.Errorf("unexpected body size: %d", chunk.BodySize())
 	}
 }
@@ -72,7 +73,8 @@ func TestListChunk(t *testing.T) {
 	if !bytes.Equal(chunk.ChunkID(), []byte("LIST")) {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
 	}
-	if chunk.BodySize() != 48 {
+	// 4 (list type) + 8 + 11 + 1 (padding) + 8 + 17 + 1 (padding)
+	if chunk.BodySize() != 50 {
 		t.Errorf("unexpected body size: %d", chunk.BodySize())
 	}
 }

@@ -52,7 +52,8 @@ func (c *RIFFChunk) ChunkID() []byte {
 func (c *RIFFChunk) BodySize() (size uint32) {
 	size = typeBytes
 	for _, p := range c.Payload {
-		size += HeaderBytes + p.BodySize()
+		b := p.BodySize()
+		size += HeaderBytes + b + (b & 1) // an odd-sized chunk is followed by a padding byte
 	}
 	return
 }
@@ -80,7 +81,8 @@ func (c *ListChunk) ChunkID() []byte {
 func (c *ListChunk) BodySize() (size uint32) {
 	size = typeBytes
 	for _, p := range c.Payload {
-		size += HeaderBytes + p.BodySize()
+		b := p.BodySize()
+		size += HeaderBytes + b + (b & 1) // an odd-sized chunk is followed by a padding byte
 	}
 	return
 }
