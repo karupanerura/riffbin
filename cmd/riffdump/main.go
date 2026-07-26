@@ -56,6 +56,9 @@ func dumpChunk(chunk riffbin.Chunk, level int) {
 		dumper.Close()
 		os.Stdout.Write([]byte{'\n'})
 		return
+	default:
+		fmt.Printf("%s[%d] (unsupported chunk type %T)\n", chunk.ChunkID(), chunk.BodySize(), chunk)
+		return
 	}
 }
 
@@ -65,5 +68,10 @@ type replacerWriter struct {
 }
 
 func (w *replacerWriter) Write(p []byte) (int, error) {
-	return w.replacer.WriteString(w.w, string(p))
+	// the replacement may write more bytes than it was given, but an io.Writer
+	// must not report more than len(p)
+	if _, err := w.replacer.WriteString(w.w, string(p)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
