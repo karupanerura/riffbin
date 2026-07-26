@@ -6,16 +6,32 @@ jobs:
     strategy:
       matrix:
         go:
-          - "^1.18.0"
-          - "^1.17.0"
-          - "^1.16.0"
+          - "1.21.x"
+          - "1.23.x"
+          - "stable"
     name: Go ${{ matrix.go }}
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-go@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
-      - run: go test -race -coverprofile=coverage.out -covermode=atomic
-      - uses: codecov/codecov-action@v1
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'ed:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: fuzz smoke test
+        run: |
+          for target in FuzzReadFull FuzzReadSections FuzzReadFullLenient; do
+            go test -run=XXX -fuzz="^${target}\$" -fuzztime=20s .
+          done
+      - uses: codecov/codecov-action@v4
         with:
-          file: ./coverage.out
+          files: ./coverage.out
+          fail_ci_if_error: false
