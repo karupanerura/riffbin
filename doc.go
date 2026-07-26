@@ -15,9 +15,12 @@
 //
 // A chunk whose body has an odd length is followed by a single 0x00 pad byte.
 // The pad byte is not counted in the chunk's own size field, but it is counted in
-// the size of the chunk that contains it. Both writers emit it, and both readers
-// require it. Pass [AllowUnpaddedChunks] to read files that omit it; riffbin up to
-// v0.0.6 wrote such files.
+// the size of the chunk that contains it. Both writers emit it. The readers require
+// it whenever the enclosing size says there is room for one; a final chunk whose
+// parent size stops right at the odd body is read without it, and a single 0x00
+// after such a chunk is tolerated at the end of the input, since many writers append
+// the last pad byte without counting it. Pass [AllowUnpaddedChunks] to read files
+// that omit pad bytes entirely; riffbin up to v0.0.6 wrote such files.
 //
 // # Reading
 //
@@ -45,7 +48,11 @@
 // back to fix them once the stream has been consumed, so it needs an io.WriteSeeker.
 //
 // A completed sub-chunk can be written repeatedly: [SubChunk.Body] hands out an
-// independent reader on every call. A write that would produce a file inconsistent
+// independent reader on every call. Before the first byte is written, the tree is
+// checked against what the readers accept: a non-ASCII FourCC, a sub-chunk using a
+// structural ID such as "LIST", or a nested RIFF chunk fails with [ErrInvalidChunk],
+// and an incomplete sub-chunk whose stream was already consumed fails with
+// [ErrConsumedIncompleteChunk]. A write that would produce a file inconsistent
 // with the declared sizes fails with [ErrSizeMismatch] or [ErrChunkTooLarge] rather
 // than emitting corrupt bytes.
 //
@@ -58,5 +65,6 @@
 //
 // RF64 and BW64 (64-bit sizes for files above 4 GiB) and the word-swapped FFIR and
 // XFIR variants are recognized but not implemented; reading one reports
-// [ErrUnsupportedFormat].
+// [ErrUnsupportedFormat]. Only the root chunk is dispatched this way: a nested chunk
+// with such an ID is treated as an opaque sub-chunk.
 package riffbin

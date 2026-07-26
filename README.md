@@ -35,7 +35,9 @@ on the right with spaces. Use a literal (`[4]byte{'f', 'm', 't', ' '}`) or
 
 A chunk whose body has an odd length is followed by a single `0x00` pad byte. The pad
 byte is not counted in the chunk's own size field, but it is counted in the size of the
-chunk containing it. Both writers emit it and both readers require it.
+chunk containing it. Both writers emit it, and the readers require it whenever the
+enclosing size says there is room for one; a final chunk whose pad byte was left
+uncounted is still read, with a single trailing `0x00` tolerated.
 
 # Examples
 
@@ -167,4 +169,7 @@ mechanical:
 | unpadded files read silently | pass `riffbin.AllowUnpaddedChunks()` |
 
 Input that used to be accepted silently — a nested `RIFF` chunk, a non-ASCII chunk ID, a
-truncated body, a tree larger than 4 GiB — is now rejected.
+truncated body — is now rejected. The writers validate the tree before emitting anything:
+a tree the readers would not accept fails with `ErrInvalidChunk`, one above 4 GiB with
+`ErrChunkTooLarge`, and an already-consumed `IncompleteSubChunk` with
+`ErrConsumedIncompleteChunk`.
