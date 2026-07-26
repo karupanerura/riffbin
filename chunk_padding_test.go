@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/karupanerura/riffbin"
 )
 
@@ -46,7 +45,7 @@ func TestCompletedChunkWriterPadsOddChunk(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	n, err := riffbin.NewCompletedChunkWriter(&buf).Write(paddedFileChunk())
+	n, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(paddedFileChunk())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,13 +65,14 @@ func TestReadFullPadding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if df := cmp.Diff(paddedFileChunk(), got, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
+		if df := cmp.Diff(paddedFileChunk(), got); df != "" {
 			t.Errorf("diff = %s", df)
 		}
 	})
 	t.Run("LegacyUnpaddedFile", func(t *testing.T) {
-		// riffbin up to v0.0.6 wrote no padding byte after odd-sized chunks;
-		// such files must still be readable.
+		// riffbin up to v0.0.6 wrote no padding byte after odd-sized chunks.
+		// Such files violate the specification, so they are rejected unless
+		// AllowUnpaddedChunks is given.
 		t.Parallel()
 		legacy := []byte{
 			0x52, 0x49, 0x46, 0x46, // id (RIFF)
@@ -86,13 +86,32 @@ func TestReadFullPadding(t *testing.T) {
 			0x77, 0x78, 0x79, 0x7A, // "wxyz"
 		}
 
-		got, err := riffbin.ReadFull(bytes.NewReader(legacy))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if df := cmp.Diff(paddedFileChunk(), got, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
-			t.Errorf("diff = %s", df)
-		}
+		t.Run("Strict", func(t *testing.T) {
+			t.Parallel()
+			if _, err := riffbin.ReadFull(bytes.NewReader(legacy)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("should be ErrInvalidFormat but got: %v", err)
+			}
+		})
+		t.Run("AllowUnpaddedChunks", func(t *testing.T) {
+			t.Parallel()
+			got, err := riffbin.ReadFull(bytes.NewReader(legacy), riffbin.AllowUnpaddedChunks())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if df := cmp.Diff(paddedFileChunk(), got); df != "" {
+				t.Errorf("diff = %s", df)
+			}
+		})
+		t.Run("AllowUnpaddedChunksSections", func(t *testing.T) {
+			t.Parallel()
+			got, err := riffbin.ReadSections(bytes.NewReader(legacy), riffbin.AllowUnpaddedChunks())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Payload) != 2 {
+				t.Fatalf("should have 2 sub-chunks but got: %d", len(got.Payload))
+			}
+		})
 	})
 	t.Run("OddFinalChunkWithoutPadding", func(t *testing.T) {
 		t.Parallel()
@@ -219,7 +238,7 @@ func TestReadFullPadding(t *testing.T) {
 				},
 			},
 		}
-		if df := cmp.Diff(expected, got, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
+		if df := cmp.Diff(expected, got); df != "" {
 			t.Errorf("diff = %s", df)
 		}
 	})
@@ -279,7 +298,7 @@ func TestRoundTripOddChunks(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if _, err := riffbin.NewCompletedChunkWriter(&buf).Write(riffChunk); err != nil {
+	if _, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(riffChunk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -287,7 +306,7 @@ func TestRoundTripOddChunks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if df := cmp.Diff(riffChunk, got, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
+	if df := cmp.Diff(riffChunk, got); df != "" {
 		t.Errorf("diff = %s", df)
 	}
 }
@@ -322,7 +341,7 @@ func TestIncompleteChunkWriterPadsOddChunk(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		n, err := w.Write(build())
+		n, err := w.WriteChunk(build())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -354,7 +373,7 @@ func TestIncompleteChunkWriterPadsOddChunk(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		n, err := w.Write(build())
+		n, err := w.WriteChunk(build())
 		if err != nil {
 			t.Fatal(err)
 		}
