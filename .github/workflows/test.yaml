@@ -1,21 +1,48 @@
 name: test
-on: push
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         go:
-          - "^1.18.0"
-          - "^1.17.0"
-          - "^1.16.0"
+          # the floor the go directive promises, then every release Go still supports
+          - "1.21.x"
+          - "1.25.x"
+          - "1.26.x"
     name: Go ${{ matrix.go }}
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-go@v2
+      # actions are pinned to a commit SHA so a moved tag cannot change what runs;
+      # the trailing comment is the release that SHA came from, kept current by dependabot
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
-      - run: go test -race -coverprofile=coverage.out -covermode=atomic
-      - uses: codecov/codecov-action@v1
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'ed:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: fuzz smoke test
+        run: |
+          for target in FuzzReadFull FuzzReadSections FuzzReadFullLenient; do
+            go test -run=XXX -fuzz="^${target}\$" -fuzztime=20s .
+          done
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
-          file: ./coverage.out
+          files: ./coverage.out
+          fail_ci_if_error: false

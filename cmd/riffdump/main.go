@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,20 +13,24 @@ import (
 )
 
 func main() {
+	log.SetFlags(0)
 	if len(os.Args) != 2 {
-		log.Printf("Usage: %s RIFF-file", os.Args[0])
+		log.Fatalf("Usage: %s RIFF-file", os.Args[0])
 	}
 
 	f, err := os.Open(os.Args[1])
 	if err != nil {
-		log.Fatalf("%s: %s", err.Error(), os.Args[1])
+		log.Fatalf("%s: %s", os.Args[1], err)
 	}
 	defer f.Close()
 
 	riffChunk, err := riffbin.ReadSections(f)
 	if err != nil {
-		pos, _ := f.Seek(0, io.SeekCurrent)
-		log.Fatalf("%s: %s at %d", err.Error(), os.Args[1], pos)
+		var syntaxErr *riffbin.SyntaxError
+		if errors.As(err, &syntaxErr) {
+			log.Fatalf("%s: %s at %d in %s", os.Args[1], syntaxErr.Reason, syntaxErr.Offset, syntaxErr.Path)
+		}
+		log.Fatalf("%s: %s", os.Args[1], err)
 	}
 
 	dumpChunk(riffChunk, 0)
@@ -35,15 +40,9 @@ func dumpChunk(chunk riffbin.Chunk, level int) {
 	indent := strings.Repeat("  ", level)
 	io.WriteString(os.Stdout, indent)
 	switch c := chunk.(type) {
-	case *riffbin.RIFFChunk:
-		fmt.Printf("RIFF[%s:%d]:\n", c.FormType, c.BodySize())
-		for _, cc := range c.Payload {
-			dumpChunk(cc, level+1)
-		}
-		return
-	case *riffbin.ListChunk:
-		fmt.Printf("LIST[%s:%d]:\n", c.ListType, c.BodySize())
-		for _, cc := range c.Payload {
+	case riffbin.GroupedChunk:
+		fmt.Printf("%s[%s:%d]:\n", c.ChunkID(), c.GroupType(), c.BodySize())
+		for _, cc := range c.SubChunks() {
 			dumpChunk(cc, level+1)
 		}
 		return
@@ -53,9 +52,12 @@ func dumpChunk(chunk riffbin.Chunk, level int) {
 		io.WriteString(os.Stdout, indent)
 		replacer := strings.NewReplacer("\n", "\n"+indent+indent)
 		dumper := hex.Dumper(&replacerWriter{w: os.Stdout, replacer: replacer})
-		_, _ = io.Copy(dumper, c)
+		_, _ = io.Copy(dumper, c.Body())
 		dumper.Close()
 		os.Stdout.Write([]byte{'\n'})
+		return
+	default:
+		fmt.Printf("%s[%d] (unsupported chunk type %T)\n", chunk.ChunkID(), chunk.BodySize(), chunk)
 		return
 	}
 }
@@ -66,5 +68,10 @@ type replacerWriter struct {
 }
 
 func (w *replacerWriter) Write(p []byte) (int, error) {
-	return w.replacer.WriteString(w.w, string(p))
+	// the replacement may write more bytes than it was given, but an io.Writer
+	// must not report more than len(p)
+	if _, err := w.replacer.WriteString(w.w, string(p)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }

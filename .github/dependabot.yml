@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # SHA pins in the workflows go stale silently, so let dependabot move them and
+  # rewrite the version comment alongside
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly

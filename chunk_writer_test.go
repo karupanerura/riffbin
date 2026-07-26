@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/karupanerura/riffbin"
 )
 
@@ -83,7 +82,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		n, err := riffbin.NewCompletedChunkWriter(&buf).Write(riffChunk)
+		n, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(riffChunk)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -108,7 +107,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 			t.Parallel()
 			if got, err := riffbin.ReadFull(&buf); err != nil {
 				t.Fatal(err)
-			} else if df := cmp.Diff(got, riffChunk, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
+			} else if df := cmp.Diff(got, riffChunk); df != "" {
 				t.Error(df)
 			}
 		})
@@ -116,7 +115,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 
 	t.Run("UnexpectedIncompleteError", func(t *testing.T) {
 		t.Parallel()
-		n, err := riffbin.NewCompletedChunkWriter(io.Discard).Write(&riffbin.RIFFChunk{
+		n, err := riffbin.NewCompletedChunkWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
 			FormType: [4]byte{'T', 'E', 'S', 'T'},
 			Payload: []riffbin.Chunk{
 				riffbin.NewIncompleteSubChunk([4]byte{'E', 'N', 'T', '1'}, strings.NewReader("sample")),
@@ -125,8 +124,9 @@ func TestCompletedChunkWriter(t *testing.T) {
 		if !errors.Is(err, riffbin.ErrUnexpectedIncompleteChunk) {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if n != 20 {
-			t.Fatalf("should be 20 bytes are written but got: %d", n)
+		// the tree is validated before anything is written
+		if n != 0 {
+			t.Fatalf("should be 0 bytes are written but got: %d", n)
 		}
 	})
 
@@ -183,7 +183,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 
 		var buf bytes.Buffer
 		c := crc32.NewIEEE()
-		n, err := riffbin.NewCompletedChunkWriter(io.MultiWriter(&buf, c)).Write(riffChunk)
+		n, err := riffbin.NewCompletedChunkWriter(io.MultiWriter(&buf, c)).WriteChunk(riffChunk)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -199,7 +199,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 			t.Parallel()
 			if got, err := riffbin.ReadFull(&buf); err != nil {
 				t.Fatal(err)
-			} else if df := cmp.Diff(got, riffChunk, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
+			} else if df := cmp.Diff(got, riffChunk); df != "" {
 				t.Error(df)
 			}
 		})
@@ -230,7 +230,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 
 		var buf bytes.Buffer
 		c := crc32.NewIEEE()
-		n, err := riffbin.NewCompletedChunkWriter(io.MultiWriter(&buf, c)).Write(riffChunk)
+		n, err := riffbin.NewCompletedChunkWriter(io.MultiWriter(&buf, c)).WriteChunk(riffChunk)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -246,7 +246,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 			t.Parallel()
 			if got, err := riffbin.ReadFull(&buf); err != nil {
 				t.Fatal(err)
-			} else if df := cmp.Diff(got, riffChunk, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
+			} else if df := cmp.Diff(got, riffChunk); df != "" {
 				t.Error(df)
 			}
 		})
@@ -255,7 +255,7 @@ func TestCompletedChunkWriter(t *testing.T) {
 	t.Run("EmulateIOError", func(t *testing.T) {
 		t.Parallel()
 		for lim := int64(0); lim < 2044; lim++ {
-			n, err := riffbin.NewCompletedChunkWriter(&limitedWriter{N: lim, W: io.Discard}).Write(&riffbin.RIFFChunk{
+			n, err := riffbin.NewCompletedChunkWriter(&limitedWriter{N: lim, W: io.Discard}).WriteChunk(&riffbin.RIFFChunk{
 				FormType: [4]byte{'W', 'A', 'V', 'E'},
 				Payload: []riffbin.Chunk{
 					&riffbin.OnMemorySubChunk{
@@ -301,7 +301,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		n, err := w.Write(&riffbin.RIFFChunk{
+		n, err := w.WriteChunk(&riffbin.RIFFChunk{
 			FormType: [4]byte{'T', 'E', 'S', 'T'},
 			Payload: []riffbin.Chunk{
 				riffbin.NewIncompleteSubChunk([4]byte{'E', 'N', 'T', '1'}, strings.NewReader("sample")),
@@ -360,7 +360,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		n, err := w.Write(&riffbin.RIFFChunk{
+		n, err := w.WriteChunk(&riffbin.RIFFChunk{
 			FormType: [4]byte{'T', 'E', 'S', 'T'},
 			Payload: []riffbin.Chunk{
 				riffbin.NewIncompleteSubChunk([4]byte{'E', 'N', 'T', '1'}, strings.NewReader("sample")),
@@ -419,7 +419,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		n, err := w.Write(&riffbin.RIFFChunk{
+		n, err := w.WriteChunk(&riffbin.RIFFChunk{
 			FormType: [4]byte{'T', 'E', 'S', 'T'},
 			Payload: []riffbin.Chunk{
 				&riffbin.OnMemorySubChunk{
@@ -479,7 +479,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		n, err := w.Write(&riffbin.RIFFChunk{
+		n, err := w.WriteChunk(&riffbin.RIFFChunk{
 			FormType: [4]byte{'T', 'E', 'S', 'T'},
 			Payload: []riffbin.Chunk{
 				&riffbin.ListChunk{
@@ -555,7 +555,7 @@ func TestInompletedChunkWriter(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		n, err := w.Write(&riffbin.RIFFChunk{
+		n, err := w.WriteChunk(&riffbin.RIFFChunk{
 			FormType: [4]byte{'W', 'A', 'V', 'E'},
 			Payload: []riffbin.Chunk{
 				&riffbin.OnMemorySubChunk{
@@ -613,9 +613,9 @@ func TestInompletedChunkWriter(t *testing.T) {
 	})
 }
 
-func ExampleCompletedChunkWriter_Write() {
+func ExampleCompletedChunkWriter_WriteChunk() {
 	encoder := base64.NewEncoder(base64.StdEncoding, os.Stdout)
-	_, err := riffbin.NewCompletedChunkWriter(encoder).Write(&riffbin.RIFFChunk{
+	_, err := riffbin.NewCompletedChunkWriter(encoder).WriteChunk(&riffbin.RIFFChunk{
 		FormType: [4]byte{'W', 'A', 'V', 'E'},
 		Payload: []riffbin.Chunk{
 			&riffbin.OnMemorySubChunk{
@@ -649,7 +649,7 @@ func ExampleCompletedChunkWriter_Write() {
 	// UklGRvQHAABXQVZFZm10IBAAAAABAAEARKwAAESsAAABAAgAZGF0YdAHAAB/h4+Xn6autbzDytDW3OHm6+/y9vj6/P3+//79/Pr49vLv6+bh3NbQysO8ta6mn5ePh393b2dfWFBJQjs0LigiHRgTDwwIBgQCAQAAAAECBAYIDA8TGB0iKC40O0JJUFhfZ293f4ePl5+mrrW8w8rQ1tzh5uvv8vb4+vz9/v/+/fz6+Pby7+vm4dzW0MrDvLWupp+Xj4d/d29nX1hQSUI7NC4oIh0YEw8MCAYEAgEAAAABAgQGCAwPExgdIiguNDtCSVBYX2dvd3+Hj5efpq61vMPK0Nbc4ebr7/L2+Pr8/f7//v38+vj28u/r5uHc1tDKw7y1rqafl4+Hf3dvZ19YUElCOzQuKCIdGBMPDAgGBAIBAAAAAQIEBggMDxMYHSIoLjQ7QklQWF9nb3d/h4+Xn6autbzDytDW3OHm6+/y9vj6/P3+//79/Pr49vLv6+bh3NbQysO8ta6mn5ePh393b2dfWFBJQjs0LigiHRgTDwwIBgQCAQAAAAECBAYIDA8TGB0iKC40O0JJUFhfZ293f4ePl5+mrrW8w8rQ1tzh5uvv8vb4+vz9/v/+/fz6+Pby7+vm4dzW0MrDvLWupp+Xj4d/d29nX1hQSUI7NC4oIh0YEw8MCAYEAgEAAAABAgQGCAwPExgdIiguNDtCSVBYX2dvd3+Hj5efpq61vMPK0Nbc4ebr7/L2+Pr8/f7//v38+vj28u/r5uHc1tDKw7y1rqafl4+Hf3dvZ19YUElCOzQuKCIdGBMPDAgGBAIBAAAAAQIEBggMDxMYHSIoLjQ7QklQWF9nb3d/h4+Xn6autbzDytDW3OHm6+/y9vj6/P3+//79/Pr49vLv6+bh3NbQysO8ta6mn5ePh393b2dfWFBJQjs0LigiHRgTDwwIBgQCAQAAAAECBAYIDA8TGB0iKC40O0JJUFhfZ293f4ePl5+mrrW8w8rQ1tzh5uvv8vb4+vz9/v/+/fz6+Pby7+vm4dzW0MrDvLWupp+Xj4d/d29nX1hQSUI7NC4oIh0YEw8MCAYEAgEAAAABAgQGCAwPExgdIiguNDtCSVBYX2dvd3+Hj5efpq61vMPK0Nbc4ebr7/L2+Pr8/f7//v38+vj28u/r5uHc1tDKw7y1rqafl4+Hf3dvZ19YUElCOzQuKCIdGBMPDAgGBAIBAAAAAQIEBggMDxMYHSIoLjQ7QklQWF9nb3d/h4+Xn6autbzDytDW3OHm6+/y9vj6/P3+//79/Pr49vLv6+bh3NbQysO8ta6mn5ePh393b2dfWFBJQjs0LigiHRgTDwwIBgQCAQAAAAECBAYIDA8TGB0iKC40O0JJUFhfZ293f4ePl5+mrrW8w8rQ1tzh5uvv8vb4+vz9/v/+/fz6+Pby7+vm4dzW0MrDvLWupp+Xj4d/d29nX1hQSUI7NC4oIh0YEw8MCAYEAgEAAAABAgQGCAwPExgdIiguNDtCSVBYX2dvd3+Hj5efpq61vMPK0Nbc4ebr7/L2+Pr8/f7//v38+vj28u/r5uHc1tDKw7y1rqafl4+Hf3dvZ19YUElCOzQuKCIdGBMPDAgGBAIBAAAAAQIEBggMDxMYHSIoLjQ7QklQWF9nb3d/h4+Xn6autbzDytDW3OHm6+/y9vj6/P3+//79/Pr49vLv6+bh3NbQysO8ta6mn5ePh393b2dfWFBJQjs0LigiHRgTDwwIBgQCAQAAAAECBAYIDA8TGB0iKC40O0JJUFhfZ293f4ePl5+mrrW8w8rQ1tzh5uvv8vb4+vz9/v/+/fz6+Pby7+vm4dzW0MrDvLWupp+Xj4d/d29nX1hQSUI7NC4oIh0YEw8MCAYEAgEAAAABAgQGCAwPExgdIiguNDtCSVBYX2dvd3+Hj5efpq61vMPK0Nbc4ebr7/L2+Pr8/f7//v38+vj28u/r5uHc1tDKw7y1rqafl4+Hf3dvZ19YUElCOzQuKCIdGBMPDAgGBAIBAAAAAQIEBggMDxMYHSIoLjQ7QklQWF9nb3d/h4+Xn6autbzDytDW3OHm6+/y9vj6/P3+//79/Pr49vLv6+bh3NbQysO8ta6mn5ePh393b2dfWFBJQjs0LigiHRgTDwwIBgQCAQAAAAECBAYIDA8TGB0iKC40O0JJUFhfZ293f4ePl5+mrrW8w8rQ1tzh5uvv8vb4+vz9/v/+/fz6+Pby7+vm4dzW0MrDvLWupp+Xj4d/d29nX1hQSUI7NC4oIh0YEw8MCAYEAgEAAAABAgQGCAwPExgdIiguNDtCSVBYX2dvd3+Hj5efpq61vMPK0Nbc4ebr7/L2+Pr8/f7//v38+vj28u/r5uHc1tDKw7y1rqafl4+Hf3dvZ19YUElCOzQuKCIdGBMPDAgGBAIBAAAAAQIEBggMDxMYHSIoLjQ7QklQWF9nb3d/h4+Xn6autbzDytDW3OHm6+/y9vj6/P3+//79/Pr49vLv6+bh3NbQysO8ta6mn5ePh393b2dfWFBJQjs0LigiHRgTDwwIBgQCAQAAAAECBAYIDA8TGB0iKC40O0JJUFhfZ293f4ePl5+mrrW8w8rQ1tzh5uvv8vb4+vz9/v/+/fz6+Pby7+vm4dzW0MrDvLWupp+Xj4d/d29nX1hQSUI7NC4oIh0YEw8MCAYEAgEAAAABAgQGCAwPExgdIiguNDtCSVBYX2dvdw==
 }
 
-func ExampleIncompleteChunkWriter_Write() {
+func ExampleIncompleteChunkWriter_WriteChunk() {
 	f, err := os.CreateTemp("", "riffbin")
 	if err != nil {
 		panic(err)
@@ -661,7 +661,7 @@ func ExampleIncompleteChunkWriter_Write() {
 		panic(err)
 	}
 
-	_, err = w.Write(&riffbin.RIFFChunk{
+	_, err = w.WriteChunk(&riffbin.RIFFChunk{
 		FormType: [4]byte{'W', 'A', 'V', 'E'},
 		Payload: []riffbin.Chunk{
 			&riffbin.OnMemorySubChunk{

@@ -2,18 +2,15 @@ package riffbin
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 )
 
-var ErrUnexpectedIncompleteChunk = errors.New("unexpected incomplete chunk")
-
 // ChunkWriter is a interface for RIFF chunk writer.
 type ChunkWriter interface {
-	// Write writes the RIFF message to the underlying data stream.
+	// WriteChunk writes the RIFF message to the underlying data stream.
 	// It returns the number of bytes written and any error encountered that caused the write to stop early. (same as Write of io.Writer)
-	Write(*RIFFChunk) (int64, error)
+	WriteChunk(*RIFFChunk) (int64, error)
 }
 
 // CompletedChunkWriter is a RIFF chunk writer for the completed chunk.
@@ -27,47 +24,62 @@ func NewCompletedChunkWriter(w io.Writer) *CompletedChunkWriter {
 	return &CompletedChunkWriter{w: w}
 }
 
-// Write writes the RIFF message to the underlying data stream.
+// WriteChunk writes the RIFF message to the underlying data stream.
 // It returns the number of bytes written and any error encountered that caused the write to stop early. (same as Write of io.Writer)
-func (w *CompletedChunkWriter) Write(c *RIFFChunk) (int64, error) {
-	return writeChunk(w.w, c, false)
+func (w *CompletedChunkWriter) WriteChunk(c *RIFFChunk) (int64, error) {
+	if err := validateChunk(c, true, false); err != nil {
+		return 0, err
+	}
+	return writeChunk(w.w, c, c.ByteOrder.binary(), false)
 }
 
 // IncompleteChunkWriter is a RIFF chunk writer for the incomplete chunk.
 type IncompleteChunkWriter struct {
-	w    io.WriteSeeker
-	head int64
+	w io.WriteSeeker
 }
 
 var _ ChunkWriter = (*IncompleteChunkWriter)(nil)
 
 // NewIncompleteChunkWriter creates a new IncompleteChunkWriter.
 func NewIncompleteChunkWriter(w io.WriteSeeker) (*IncompleteChunkWriter, error) {
-	pos, err := w.Seek(0, io.SeekCurrent)
-	if err != nil {
+	// reject writers that cannot actually seek before anything is written
+	if _, err := w.Seek(0, io.SeekCurrent); err != nil {
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 
-	return &IncompleteChunkWriter{w: w, head: pos}, nil
+	return &IncompleteChunkWriter{w: w}, nil
 }
 
-// Write writes the RIFF message to the underlying data stream, and re-write the bytes of the all chunk headers size to fix incomplete body bytes by random write.
+// WriteChunk writes the RIFF message to the underlying data stream, and re-write the bytes of the all chunk headers size to fix incomplete body bytes by random write.
 // It returns the number of bytes written and any error encountered that caused the write to stop early. (same as Write of io.Writer)
-func (w *IncompleteChunkWriter) Write(c *RIFFChunk) (n int64, err error) {
-	n, err = writeChunk(w.w, c, true)
+func (w *IncompleteChunkWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
+	if err = validateChunk(c, true, true); err != nil {
+		return 0, err
+	}
+
+	// the size backfill is relative to wherever this chunk starts, so a writer can be
+	// used for several consecutive chunks
+	start, err := w.w.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, fmt.Errorf("seek: %w", err)
+	}
+
+	order := c.ByteOrder.binary()
+
+	n, err = writeChunk(w.w, c, order, true)
 	if err != nil {
 		err = fmt.Errorf("writeChunk at first: %w", err)
 		return
 	}
 
 	// XXX: shared state for absolute seek position
-	posState := w.head
+	posState := start
 
 	var chunkBodyRandomWriter func(b uint32) error
 	if ww, ok := w.w.(io.WriterAt); ok {
 		// io.WriterAt for optimize
 		chunkBodyRandomWriter = func(b uint32) error {
-			_, err := writeChunkBodySizeAt(ww, b, posState)
+			_, err := writeChunkBodySizeAt(ww, order, b, posState)
 			if err != nil {
 				return fmt.Errorf("writeChunkBodySizeAt: %w", err)
 			}
@@ -75,11 +87,10 @@ func (w *IncompleteChunkWriter) Write(c *RIFFChunk) (n int64, err error) {
 			return nil
 		}
 	} else {
-		// revert seek position
+		// revert seek position without masking an error from the backfill below
 		defer func() {
-			_, err = w.w.Seek(w.head+n, io.SeekStart)
-			if err != nil {
-				err = fmt.Errorf("seek: %w", err)
+			if _, seekErr := w.w.Seek(start+n, io.SeekStart); seekErr != nil && err == nil {
+				err = fmt.Errorf("seek: %w", seekErr)
 			}
 		}()
 
@@ -90,7 +101,7 @@ func (w *IncompleteChunkWriter) Write(c *RIFFChunk) (n int64, err error) {
 				return fmt.Errorf("seek: %w", err)
 			}
 
-			_, err = writeChunkBodySize(w.w, b)
+			_, err = writeChunkBodySize(w.w, order, b)
 			if err != nil {
 				return fmt.Errorf("writeChunkBodySizeAt: %w", err)
 			}
@@ -110,18 +121,21 @@ func (w *IncompleteChunkWriter) Write(c *RIFFChunk) (n int64, err error) {
 }
 
 func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
-	*pos += idBytes
-	b := c.BodySize()
-	err := f(b)
+	*pos += IDBytes
+	b, err := chunkBodySize(c)
 	if err != nil {
 		return err
 	}
-	*pos += sizeBytes
+	err = f(b)
+	if err != nil {
+		return err
+	}
+	*pos += SizeBytes
 
 	switch cc := c.(type) {
-	case groupedChunk:
-		*pos += typeBytes
-		for _, p := range cc.payload() {
+	case GroupedChunk:
+		*pos += TypeBytes
+		for _, p := range cc.SubChunks() {
 			err := writeComplete(p, pos, f)
 			if err != nil {
 				return err
@@ -129,6 +143,57 @@ func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
 		}
 	case SubChunk:
 		*pos += int64(b) + int64(b&1) // skip the padding byte after an odd-sized body
+	default:
+		return unsupportedChunkTypeError(c)
+	}
+
+	return nil
+}
+
+// validateChunk checks, before a single byte is written, that the tree can be written as
+// a RIFF file the readers accept. The readers dispatch on chunk IDs, so a sub-chunk using
+// a structural ID or a nested RIFF chunk would be read back as a different structure.
+func validateChunk(c Chunk, root, allowIncomplete bool) error {
+	id := c.ChunkID()
+	if !id.Valid() {
+		return fmt.Errorf("%w: chunk ID %q is not printable ASCII", ErrInvalidChunk, id[:])
+	}
+	if _, err := chunkBodySize(c); err != nil {
+		return err
+	}
+
+	switch cc := c.(type) {
+	case GroupedChunk:
+		if groupType := cc.GroupType(); !groupType.Valid() {
+			return fmt.Errorf("%w: group type %q of the %s chunk is not printable ASCII", ErrInvalidChunk, groupType[:], id)
+		}
+		if root {
+			if id != riffID && id != rifxID {
+				return fmt.Errorf("%w: root chunk ID is %q, want %q or %q", ErrInvalidChunk, id, riffID, rifxID)
+			}
+		} else if id != listID {
+			return fmt.Errorf("%w: a %s chunk must not be nested", ErrInvalidChunk, id)
+		}
+		for _, p := range cc.SubChunks() {
+			if err := validateChunk(p, false, allowIncomplete); err != nil {
+				return err
+			}
+		}
+	case SubChunk:
+		switch id {
+		case riffID, rifxID, listID:
+			return fmt.Errorf("%w: %s is a grouped-chunk ID but the chunk is a sub-chunk", ErrInvalidChunk, id)
+		}
+		if cc.Incomplete() {
+			if !allowIncomplete {
+				return ErrUnexpectedIncompleteChunk
+			}
+			if b := cc.BodySize(); b != 0 {
+				return fmt.Errorf("%w: chunk[%q] reports %d byte(s) before being written", ErrConsumedIncompleteChunk, id, b)
+			}
+		}
+	default:
+		return unsupportedChunkTypeError(c)
 	}
 
 	return nil
@@ -136,18 +201,18 @@ func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
 
 var paddingByte = [1]byte{0x00}
 
-func writeChunk(w io.Writer, c Chunk, allowIncomplete bool) (n int64, err error) {
-	n, err = writeChunkHeader(w, c)
+func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowIncomplete bool) (n int64, err error) {
+	n, err = writeChunkHeader(w, c, order)
 	if err != nil {
-		err = fmt.Errorf("chunk[%q] header: %w", string(c.ChunkID()), err)
+		err = fmt.Errorf("chunk[%q] header: %w", c.ChunkID(), err)
 		return
 	}
 
 	var nn int64
-	nn, err = writeChunkBody(w, c, allowIncomplete)
+	nn, err = writeChunkBody(w, c, order, allowIncomplete)
 	n += nn
 	if err != nil {
-		err = fmt.Errorf("chunk[%q] body: %w", string(c.ChunkID()), err)
+		err = fmt.Errorf("chunk[%q] body: %w", c.ChunkID(), err)
 		return
 	}
 
@@ -159,7 +224,7 @@ func writeChunk(w io.Writer, c Chunk, allowIncomplete bool) (n int64, err error)
 		pn, err = w.Write(paddingByte[:])
 		n += int64(pn)
 		if err != nil {
-			err = fmt.Errorf("chunk[%q] padding: %w", string(c.ChunkID()), err)
+			err = fmt.Errorf("chunk[%q] padding: %w", c.ChunkID(), err)
 			return
 		}
 	}
@@ -167,25 +232,32 @@ func writeChunk(w io.Writer, c Chunk, allowIncomplete bool) (n int64, err error)
 	return
 }
 
-func writeChunkHeader(w io.Writer, c Chunk) (n int64, err error) {
-	var nn int
+func writeChunkHeader(w io.Writer, c Chunk, order binary.ByteOrder) (n int64, err error) {
+	var b uint32
+	b, err = chunkBodySize(c)
+	if err != nil {
+		return
+	}
 
-	nn, err = w.Write(c.ChunkID())
+	var nn int
+	id := c.ChunkID()
+	nn, err = w.Write(id[:])
 	n = int64(nn)
 	if err != nil {
 		err = fmt.Errorf("id: %w", err)
 		return
 	}
 
-	nn, err = writeChunkBodySize(w, c.BodySize())
+	nn, err = writeChunkBodySize(w, order, b)
 	n += int64(nn)
 	if err != nil {
 		err = fmt.Errorf("size: %w", err)
 		return
 	}
 
-	if cc, ok := c.(groupedChunk); ok {
-		nn, err = w.Write(cc.groupType())
+	if cc, ok := c.(GroupedChunk); ok {
+		groupType := cc.GroupType()
+		nn, err = w.Write(groupType[:])
 		n += int64(nn)
 		if err != nil {
 			err = fmt.Errorf("type: %w", err)
@@ -196,24 +268,37 @@ func writeChunkHeader(w io.Writer, c Chunk) (n int64, err error) {
 	return
 }
 
-func writeChunkBodySize(w io.Writer, b uint32) (int, error) {
-	var buf [sizeBytes]byte
-	binary.LittleEndian.PutUint32(buf[:], b)
+// chunkBodySize converts the declared body size to the on-disk 32-bit size field,
+// rejecting sizes that the RIFF format cannot express instead of silently wrapping around.
+func chunkBodySize(c Chunk) (uint32, error) {
+	b := c.BodySize()
+	if b < 0 {
+		return 0, fmt.Errorf("%w: chunk[%q] reports a negative body size %d", ErrSizeMismatch, c.ChunkID(), b)
+	}
+	if b > MaxBodySize {
+		return 0, fmt.Errorf("%w: chunk[%q] body is %d bytes", ErrChunkTooLarge, c.ChunkID(), b)
+	}
+	return uint32(b), nil
+}
+
+func writeChunkBodySize(w io.Writer, order binary.ByteOrder, b uint32) (int, error) {
+	var buf [SizeBytes]byte
+	order.PutUint32(buf[:], b)
 	return w.Write(buf[:])
 }
 
-func writeChunkBodySizeAt(w io.WriterAt, b uint32, off int64) (int, error) {
-	var buf [sizeBytes]byte
-	binary.LittleEndian.PutUint32(buf[:], b)
+func writeChunkBodySizeAt(w io.WriterAt, order binary.ByteOrder, b uint32, off int64) (int, error) {
+	var buf [SizeBytes]byte
+	order.PutUint32(buf[:], b)
 	return w.WriteAt(buf[:], off)
 }
 
-func writeChunkBody(w io.Writer, c Chunk, allowIncomplete bool) (n int64, err error) {
+func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowIncomplete bool) (n int64, err error) {
 	switch cc := c.(type) {
-	case groupedChunk:
+	case GroupedChunk:
 		var nn int64
-		for i, p := range cc.payload() {
-			nn, err = writeChunk(w, p, allowIncomplete)
+		for i, p := range cc.SubChunks() {
+			nn, err = writeChunk(w, p, order, allowIncomplete)
 			n += nn
 			if err != nil {
 				err = fmt.Errorf("payload[%d]: %w", i, err)
@@ -221,14 +306,35 @@ func writeChunkBody(w io.Writer, c Chunk, allowIncomplete bool) (n int64, err er
 			}
 		}
 	case SubChunk:
-		if !allowIncomplete && cc.Incomplete() {
-			err = ErrUnexpectedIncompleteChunk
+		if cc.Incomplete() {
+			if !allowIncomplete {
+				err = ErrUnexpectedIncompleteChunk
+				return
+			}
+
+			// the body size of an incomplete chunk is only known once it has been read,
+			// so there is nothing to verify it against
+			n, err = io.Copy(w, cc.Body())
 			return
 		}
 
-		n, err = io.Copy(w, cc)
+		want := cc.BodySize()
+		n, err = io.Copy(w, cc.Body())
+		if err != nil {
+			return
+		}
+		if n != want {
+			// the header has already been written with the declared size, so carrying on
+			// would emit a corrupt file
+			err = fmt.Errorf("%w: chunk[%q] declares %d bytes but produced %d", ErrSizeMismatch, cc.ChunkID(), want, n)
+			return
+		}
 	default:
-		panic(fmt.Sprintf("unknown chunk type: %+v", c))
+		err = unsupportedChunkTypeError(c)
 	}
 	return
+}
+
+func unsupportedChunkTypeError(c Chunk) error {
+	return fmt.Errorf("%w: %T is neither a GroupedChunk nor a SubChunk", ErrUnsupportedChunkType, c)
 }

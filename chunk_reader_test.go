@@ -49,7 +49,7 @@ func TestReadFull(t *testing.T) {
 				},
 			}
 
-			if df := cmp.Diff(riffChunk, expected, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
+			if df := cmp.Diff(riffChunk, expected); df != "" {
 				t.Errorf("diff = %s", df)
 			}
 		})
@@ -66,7 +66,7 @@ func TestReadFull(t *testing.T) {
 				Payload:  []riffbin.Chunk{},
 			}
 
-			if df := cmp.Diff(riffChunk, expected, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
+			if df := cmp.Diff(riffChunk, expected); df != "" {
 				t.Errorf("diff = %s", df)
 			}
 		})
@@ -88,7 +88,7 @@ func TestReadFull(t *testing.T) {
 				},
 			}
 
-			if df := cmp.Diff(riffChunk, expected, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
+			if df := cmp.Diff(riffChunk, expected); df != "" {
 				t.Errorf("diff = %s", df)
 			}
 		})
@@ -110,7 +110,7 @@ func TestReadFull(t *testing.T) {
 				},
 			}
 
-			if df := cmp.Diff(riffChunk, expected, cmpopts.IgnoreUnexported(riffbin.OnMemorySubChunk{})); df != "" {
+			if df := cmp.Diff(riffChunk, expected); df != "" {
 				t.Errorf("diff = %s", df)
 			}
 		})
@@ -138,7 +138,7 @@ func TestReadFull(t *testing.T) {
 			t.Run(tt.Name, func(t *testing.T) {
 				t.Parallel()
 				c, err := riffbin.ReadFull(bytes.NewReader(tt.Bytes))
-				if err != riffbin.ErrInvalidFormat {
+				if !errors.Is(err, riffbin.ErrInvalidFormat) {
 					t.Errorf("unexpected error: %v", err)
 				}
 				if c != nil {
@@ -169,10 +169,10 @@ func ExampleReadFull() {
 		panic(err)
 	}
 
-	fmt.Printf("ID = %q\n", string(riffChunk.ChunkID()))
+	fmt.Printf("ID = %q\n", riffChunk.ChunkID())
 	fmt.Printf("Size = %d\n", riffChunk.BodySize())
 	for i, p := range riffChunk.Payload {
-		fmt.Printf("[%d]ID = %q\n", i, string(p.ChunkID()))
+		fmt.Printf("[%d]ID = %q\n", i, p.ChunkID())
 		fmt.Printf("[%d]Size = %d\n", i, p.BodySize())
 	}
 
@@ -329,7 +329,7 @@ func TestReadSections(t *testing.T) {
 			t.Run(tt.Name, func(t *testing.T) {
 				t.Parallel()
 				c, err := riffbin.ReadSections(bytes.NewReader(tt.Bytes))
-				if err != riffbin.ErrInvalidFormat {
+				if !errors.Is(err, riffbin.ErrInvalidFormat) {
 					t.Errorf("unexpected error: %v", err)
 				}
 				if c != nil {
@@ -352,10 +352,10 @@ func ExampleReadSections() {
 		panic(err)
 	}
 
-	fmt.Printf("ID = %q\n", string(riffChunk.ChunkID()))
+	fmt.Printf("ID = %q\n", riffChunk.ChunkID())
 	fmt.Printf("Size = %d\n", riffChunk.BodySize())
 	for i, p := range riffChunk.Payload {
-		fmt.Printf("[%d]ID = %q\n", i, string(p.ChunkID()))
+		fmt.Printf("[%d]ID = %q\n", i, p.ChunkID())
 		fmt.Printf("[%d]Size = %d\n", i, p.BodySize())
 	}
 
