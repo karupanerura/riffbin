@@ -42,8 +42,8 @@ func AllowUnpaddedChunks() ReaderOption {
 }
 
 // AllowTrailingData ignores any bytes that follow the RIFF chunk instead of rejecting them.
-// Without it a single 0x00 is still tolerated, because writers commonly append the pad byte
-// of an odd-sized final chunk without counting it in the RIFF chunk size.
+// Without it a single 0x00 is still tolerated after an odd-sized final chunk, because
+// writers commonly append its pad byte without counting it in the RIFF chunk size.
 func AllowTrailingData() ReaderOption {
 	return readerOptionFunc(func(c *readerConfig) { c.allowTrailingData = true })
 }
@@ -103,6 +103,11 @@ type parser struct {
 	// was found instead. It is only ever set with AllowUnpaddedChunks.
 	pending     bool
 	pendingByte byte
+
+	// tolerateTrailingPad is true when the chunk read last has an odd-sized body whose
+	// pad byte is not counted in its parent's size, so a single 0x00 may follow the
+	// root chunk. See verifyEnd.
+	tolerateTrailingPad bool
 }
 
 func read(r io.Reader, pr PartialReader, limit int64, opts []ReaderOption) (*RIFFChunk, error) {
@@ -151,8 +156,9 @@ func read(r io.Reader, pr PartialReader, limit int64, opts []ReaderOption) (*RIF
 	return &RIFFChunk{ByteOrder: byteOrder, FormType: formType, Payload: payload}, nil
 }
 
-// verifyEnd rejects data beyond the root chunk. A single 0x00 is tolerated because the
-// pad byte of an odd-sized final chunk is often written without being counted in the RIFF size.
+// verifyEnd rejects data beyond the root chunk. When the final chunk has an odd-sized
+// body whose pad byte is not counted in the RIFF size, a single 0x00 is tolerated,
+// because writers commonly append that pad byte anyway.
 func (p *parser) verifyEnd() error {
 	if p.conf.allowTrailingData {
 		return nil
@@ -164,7 +170,7 @@ func (p *parser) verifyEnd() error {
 		return nil
 	case err != nil:
 		return err
-	case buf[0] != 0x00:
+	case buf[0] != 0x00 || !p.tolerateTrailingPad:
 		return p.syntaxError(p.src.off-1, "unexpected data after the root chunk")
 	}
 
@@ -266,7 +272,14 @@ func (p *parser) readChunk(end int64) (Chunk, error) {
 // The pad byte is not counted in the chunk's own size but is counted in its parent's size,
 // so it is absent when the parent size stops right at the end of the body.
 func (p *parser) skipPadding(id FourCC, bodyLen, end int64) error {
-	if bodyLen%2 == 0 || p.src.off >= end {
+	p.tolerateTrailingPad = false
+	if bodyLen%2 == 0 {
+		return nil
+	}
+	if p.src.off >= end {
+		// the pad byte would lie outside the parent's declared size; for the final
+		// chunk many writers append it anyway, which verifyEnd tolerates
+		p.tolerateTrailingPad = true
 		return nil
 	}
 

@@ -204,6 +204,35 @@ func TestReadFullPadding(t *testing.T) {
 			t.Errorf("should be ErrInvalidFormat but got: %v", err)
 		}
 	})
+	t.Run("TrailingZeroAfterEvenFinalChunk", func(t *testing.T) {
+		// the single trailing 0x00 is tolerated only as the uncounted pad byte of an
+		// odd-sized final chunk; after an even-sized one it is trailing garbage
+		t.Parallel()
+		b := append(append([]byte{}, paddedFileBytes...), 0x00)
+
+		if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			t.Errorf("should be ErrInvalidFormat but got: %v", err)
+		}
+		if _, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowTrailingData()); err != nil {
+			t.Errorf("AllowTrailingData should accept it but got: %v", err)
+		}
+	})
+	t.Run("TwoTrailingZerosAfterOddFinalChunk", func(t *testing.T) {
+		t.Parallel()
+		b := []byte{
+			0x52, 0x49, 0x46, 0x46, // id (RIFF)
+			0x0F, 0x00, 0x00, 0x00, // body size (4 + 8 + 3)
+			0x54, 0x45, 0x53, 0x54, // type (TEST)
+			0x45, 0x4E, 0x54, 0x31, // id (ENT1)
+			0x03, 0x00, 0x00, 0x00, // body size
+			0x61, 0x62, 0x63, // "abc"
+			0x00, 0x00, // the uncounted pad byte plus one stray zero
+		}
+
+		if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			t.Errorf("should be ErrInvalidFormat but got: %v", err)
+		}
+	})
 	t.Run("PaddedChunkInsideList", func(t *testing.T) {
 		t.Parallel()
 		b := []byte{
