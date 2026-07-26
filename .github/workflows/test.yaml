@@ -4,19 +4,26 @@ on:
     branches:
       - main
   pull_request:
+
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         go:
+          # the floor the go directive promises, then every release Go still supports
           - "1.21.x"
-          - "1.23.x"
-          - "stable"
+          - "1.25.x"
+          - "1.26.x"
     name: Go ${{ matrix.go }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      # actions are pinned to a commit SHA so a moved tag cannot change what runs;
+      # the trailing comment is the release that SHA came from, kept current by dependabot
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
       - name: gofmt
@@ -35,7 +42,7 @@ jobs:
           for target in FuzzReadFull FuzzReadSections FuzzReadFullLenient; do
             go test -run=XXX -fuzz="^${target}\$" -fuzztime=20s .
           done
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: ./coverage.out
           fail_ci_if_error: false
