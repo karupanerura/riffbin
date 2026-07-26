@@ -124,8 +124,9 @@ func TestCompletedChunkWriter(t *testing.T) {
 		if !errors.Is(err, riffbin.ErrUnexpectedIncompleteChunk) {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if n != 20 {
-			t.Fatalf("should be 20 bytes are written but got: %d", n)
+		// the tree is validated before anything is written
+		if n != 0 {
+			t.Fatalf("should be 0 bytes are written but got: %d", n)
 		}
 	})
 

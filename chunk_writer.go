@@ -27,30 +27,43 @@ func NewCompletedChunkWriter(w io.Writer) *CompletedChunkWriter {
 // WriteChunk writes the RIFF message to the underlying data stream.
 // It returns the number of bytes written and any error encountered that caused the write to stop early. (same as Write of io.Writer)
 func (w *CompletedChunkWriter) WriteChunk(c *RIFFChunk) (int64, error) {
+	if err := validateChunk(c, true, false); err != nil {
+		return 0, err
+	}
 	return writeChunk(w.w, c, c.ByteOrder.binary(), false)
 }
 
 // IncompleteChunkWriter is a RIFF chunk writer for the incomplete chunk.
 type IncompleteChunkWriter struct {
-	w    io.WriteSeeker
-	head int64
+	w io.WriteSeeker
 }
 
 var _ ChunkWriter = (*IncompleteChunkWriter)(nil)
 
 // NewIncompleteChunkWriter creates a new IncompleteChunkWriter.
 func NewIncompleteChunkWriter(w io.WriteSeeker) (*IncompleteChunkWriter, error) {
-	pos, err := w.Seek(0, io.SeekCurrent)
-	if err != nil {
+	// reject writers that cannot actually seek before anything is written
+	if _, err := w.Seek(0, io.SeekCurrent); err != nil {
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 
-	return &IncompleteChunkWriter{w: w, head: pos}, nil
+	return &IncompleteChunkWriter{w: w}, nil
 }
 
 // WriteChunk writes the RIFF message to the underlying data stream, and re-write the bytes of the all chunk headers size to fix incomplete body bytes by random write.
 // It returns the number of bytes written and any error encountered that caused the write to stop early. (same as Write of io.Writer)
 func (w *IncompleteChunkWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
+	if err = validateChunk(c, true, true); err != nil {
+		return 0, err
+	}
+
+	// the size backfill is relative to wherever this chunk starts, so a writer can be
+	// used for several consecutive chunks
+	start, err := w.w.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, fmt.Errorf("seek: %w", err)
+	}
+
 	order := c.ByteOrder.binary()
 
 	n, err = writeChunk(w.w, c, order, true)
@@ -60,7 +73,7 @@ func (w *IncompleteChunkWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
 	}
 
 	// XXX: shared state for absolute seek position
-	posState := w.head
+	posState := start
 
 	var chunkBodyRandomWriter func(b uint32) error
 	if ww, ok := w.w.(io.WriterAt); ok {
@@ -74,11 +87,10 @@ func (w *IncompleteChunkWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
 			return nil
 		}
 	} else {
-		// revert seek position
+		// revert seek position without masking an error from the backfill below
 		defer func() {
-			_, err = w.w.Seek(w.head+n, io.SeekStart)
-			if err != nil {
-				err = fmt.Errorf("seek: %w", err)
+			if _, seekErr := w.w.Seek(start+n, io.SeekStart); seekErr != nil && err == nil {
+				err = fmt.Errorf("seek: %w", seekErr)
 			}
 		}()
 
@@ -131,6 +143,55 @@ func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
 		}
 	case SubChunk:
 		*pos += int64(b) + int64(b&1) // skip the padding byte after an odd-sized body
+	default:
+		return unsupportedChunkTypeError(c)
+	}
+
+	return nil
+}
+
+// validateChunk checks, before a single byte is written, that the tree can be written as
+// a RIFF file the readers accept. The readers dispatch on chunk IDs, so a sub-chunk using
+// a structural ID or a nested RIFF chunk would be read back as a different structure.
+func validateChunk(c Chunk, root, allowIncomplete bool) error {
+	id := c.ChunkID()
+	if !id.Valid() {
+		return fmt.Errorf("%w: chunk ID %q is not printable ASCII", ErrInvalidChunk, id[:])
+	}
+	if _, err := chunkBodySize(c); err != nil {
+		return err
+	}
+
+	switch cc := c.(type) {
+	case GroupedChunk:
+		if groupType := cc.GroupType(); !groupType.Valid() {
+			return fmt.Errorf("%w: group type %q of the %s chunk is not printable ASCII", ErrInvalidChunk, groupType[:], id)
+		}
+		if root {
+			if id != riffID && id != rifxID {
+				return fmt.Errorf("%w: root chunk ID is %q, want %q or %q", ErrInvalidChunk, id, riffID, rifxID)
+			}
+		} else if id != listID {
+			return fmt.Errorf("%w: a %s chunk must not be nested", ErrInvalidChunk, id)
+		}
+		for _, p := range cc.SubChunks() {
+			if err := validateChunk(p, false, allowIncomplete); err != nil {
+				return err
+			}
+		}
+	case SubChunk:
+		switch id {
+		case riffID, rifxID, listID:
+			return fmt.Errorf("%w: %s is a grouped-chunk ID but the chunk is a sub-chunk", ErrInvalidChunk, id)
+		}
+		if cc.Incomplete() {
+			if !allowIncomplete {
+				return ErrUnexpectedIncompleteChunk
+			}
+			if b := cc.BodySize(); b != 0 {
+				return fmt.Errorf("%w: chunk[%q] reports %d byte(s) before being written", ErrConsumedIncompleteChunk, id, b)
+			}
+		}
 	default:
 		return unsupportedChunkTypeError(c)
 	}

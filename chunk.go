@@ -161,25 +161,25 @@ func (c *OnMemorySubChunk) Body() io.Reader { return bytes.NewReader(c.Payload) 
 
 // IncompleteSubChunk is a sub-chunk with the incomplete payload provided from io.Reader.
 type IncompleteSubChunk struct {
-	id FourCC
-	incompleteChunkBody
+	id   FourCC
+	body incompleteChunkBody
 }
 
 var _ SubChunk = (*IncompleteSubChunk)(nil)
 
 func NewIncompleteSubChunk(id FourCC, r io.Reader) *IncompleteSubChunk {
-	return &IncompleteSubChunk{id, incompleteChunkBody{reader: r}}
+	return &IncompleteSubChunk{id: id, body: incompleteChunkBody{reader: r}}
 }
 
 func (c *IncompleteSubChunk) ChunkID() FourCC { return c.id }
 
-func (c *IncompleteSubChunk) BodySize() int64 { return c.readLength }
+func (c *IncompleteSubChunk) BodySize() int64 { return c.body.readLength }
 
 func (c *IncompleteSubChunk) Incomplete() bool { return true }
 
 // Body returns the underlying stream. It can only be consumed once, and the chunk
 // only knows its BodySize after it has been consumed.
-func (c *IncompleteSubChunk) Body() io.Reader { return &c.incompleteChunkBody }
+func (c *IncompleteSubChunk) Body() io.Reader { return &c.body }
 
 type incompleteChunkBody struct {
 	readLength int64
@@ -198,7 +198,9 @@ func (c *incompleteChunkBody) WriteTo(w io.Writer) (n int64, err error) {
 	return
 }
 
-// InStreamSubChunk is a sub-chunk with the payload on io.SeekReader
+// InStreamSubChunk is a sub-chunk whose payload is a section of a seekable stream,
+// read on demand. ReadSections creates these; a hand-made value needs a non-nil
+// embedded *io.SectionReader, or BodySize and Body panic.
 type InStreamSubChunk struct {
 	ID FourCC
 	*io.SectionReader

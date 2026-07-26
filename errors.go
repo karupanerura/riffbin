@@ -26,6 +26,16 @@ var (
 
 	// ErrUnexpectedIncompleteChunk is returned when a CompletedChunkWriter is given an incomplete sub-chunk.
 	ErrUnexpectedIncompleteChunk = errors.New("riffbin: unexpected incomplete chunk")
+
+	// ErrInvalidChunk is returned when a chunk tree cannot be written as a RIFF file that the
+	// readers would accept: a FourCC that is not printable ASCII, a sub-chunk whose ID is a
+	// structural ID such as "LIST", or a grouped chunk below the root that is not a LIST.
+	ErrInvalidChunk = errors.New("riffbin: invalid chunk")
+
+	// ErrConsumedIncompleteChunk is returned when an incomplete sub-chunk is written after its
+	// body stream has already been consumed, which would emit a header whose size counts bytes
+	// that are no longer available.
+	ErrConsumedIncompleteChunk = errors.New("riffbin: incomplete chunk already consumed")
 )
 
 // SyntaxError describes a malformed RIFF structure and where it was found.
