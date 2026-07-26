@@ -23,7 +23,7 @@ var fuzzSeeds = [][]byte{
 	{'R', 'I', 'F', 'F', 0x0A, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x01, 0x00, 0x00, 0x00, 'A', 'B'},
 	// a LIST holding a non-empty sub-chunk, followed by another chunk
 	{
-		'R', 'I', 'F', 'F', 0x24, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'R', 'I', 'F', 'F', 0x28, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 		'L', 'I', 'S', 'T', 0x10, 0x00, 0x00, 0x00, 'L', 'S', 'T', '1',
 		'E', 'N', 'T', '1', 0x04, 0x00, 0x00, 0x00, 'a', 'b', 'c', 'd',
 		'E', 'N', 'T', '2', 0x04, 0x00, 0x00, 0x00, 'w', 'x', 'y', 'z',
@@ -113,6 +113,11 @@ func FuzzReadFullLenient(f *testing.F) {
 		if (c == nil) == (err == nil) {
 			t.Log(hex.Dump(b))
 			t.Fatal("invalid result")
+		}
+		// a leniently-read tree must still write back as a compliant file that
+		// re-reads strictly to the same tree
+		if c != nil {
+			checkRoundTrip(t, b, c)
 		}
 	})
 }
