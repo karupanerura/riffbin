@@ -36,6 +36,8 @@ const (
 	BigEndian
 )
 
+// String returns the four-character container ID the byte order selects:
+// "RIFF" for LittleEndian and "RIFX" for BigEndian.
 func (o ByteOrder) String() string {
 	if o == BigEndian {
 		return "RIFX"
@@ -86,9 +88,9 @@ type SubChunk interface {
 	// which can only be consumed once.
 	Body() io.Reader
 
-	// Incomplete returns true if the SubChunk payload is fluid, or not it returns false.
-	// Incomplete sub-chunk is only after the payload have been read that the BodySize is determined.
-	// Completed sub-chunk have a stable size of the payload.
+	// Incomplete reports whether the payload length is still unknown.
+	// An incomplete sub-chunk learns its BodySize only by having its payload
+	// read through; a completed sub-chunk knows it up front.
 	Incomplete() bool
 }
 
@@ -103,7 +105,9 @@ func groupBodySize(payload []Chunk) (size int64) {
 	return
 }
 
-// RIFFChunk is a RIFF chunk. This is must be the root chunk.
+// RIFFChunk is the RIFF chunk, the root of the tree: its body is a form type
+// such as "WAVE" followed by every other chunk of the file. The specification
+// allows it only at the top level, so the writers reject a nested one.
 type RIFFChunk struct {
 	// ByteOrder selects a "RIFF" (LittleEndian, the zero value) or a "RIFX" (BigEndian) container.
 	ByteOrder ByteOrder
@@ -127,7 +131,9 @@ func (c *RIFFChunk) GroupType() FourCC { return c.FormType }
 
 func (c *RIFFChunk) SubChunks() []Chunk { return c.Payload }
 
-// ListChunk is a LIST chunk.
+// ListChunk is a LIST chunk: an ordered sequence of sub-chunks under a
+// four-character list type. LIST is the only chunk besides RIFF that the
+// specification allows to contain other chunks.
 type ListChunk struct {
 	ListType FourCC
 	Payload  []Chunk
@@ -143,7 +149,7 @@ func (c *ListChunk) GroupType() FourCC { return c.ListType }
 
 func (c *ListChunk) SubChunks() []Chunk { return c.Payload }
 
-// OnMemorySubChunk is a sub-chunk with the payload on memory.
+// OnMemorySubChunk is a sub-chunk holding its payload in memory.
 type OnMemorySubChunk struct {
 	ID      FourCC
 	Payload []byte
@@ -159,7 +165,9 @@ func (c *OnMemorySubChunk) Incomplete() bool { return false }
 
 func (c *OnMemorySubChunk) Body() io.Reader { return bytes.NewReader(c.Payload) }
 
-// IncompleteSubChunk is a sub-chunk with the incomplete payload provided from io.Reader.
+// IncompleteSubChunk is a sub-chunk whose payload comes from an io.Reader of
+// unknown length. Only IncompleteChunkWriter can write it: the size field is
+// not known until the reader has been drained.
 type IncompleteSubChunk struct {
 	id   FourCC
 	body incompleteChunkBody
@@ -167,6 +175,9 @@ type IncompleteSubChunk struct {
 
 var _ SubChunk = (*IncompleteSubChunk)(nil)
 
+// NewIncompleteSubChunk returns a sub-chunk that streams its payload from r.
+// The length of r does not have to be known in advance: IncompleteChunkWriter
+// writes the payload through and fixes the size fields afterwards.
 func NewIncompleteSubChunk(id FourCC, r io.Reader) *IncompleteSubChunk {
 	return &IncompleteSubChunk{id: id, body: incompleteChunkBody{reader: r}}
 }

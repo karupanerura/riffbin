@@ -6,26 +6,30 @@ import (
 	"io"
 )
 
-// ChunkWriter is a interface for RIFF chunk writer.
+// ChunkWriter is the interface shared by the chunk writers: it writes a whole
+// RIFF chunk tree to an underlying data stream.
 type ChunkWriter interface {
-	// WriteChunk writes the RIFF message to the underlying data stream.
-	// It returns the number of bytes written and any error encountered that caused the write to stop early. (same as Write of io.Writer)
+	// WriteChunk writes the RIFF chunk tree to the underlying data stream.
+	// It returns the number of bytes written and any error encountered that caused the write to stop early.
 	WriteChunk(*RIFFChunk) (int64, error)
 }
 
-// CompletedChunkWriter is a RIFF chunk writer for the completed chunk.
+// CompletedChunkWriter writes chunk trees whose sizes are all known up front,
+// in a single forward pass. A tree holding an IncompleteSubChunk is rejected
+// with ErrUnexpectedIncompleteChunk; use IncompleteChunkWriter for those.
 type CompletedChunkWriter struct {
 	w io.Writer
 }
 
 var _ ChunkWriter = (*CompletedChunkWriter)(nil)
 
+// NewCompletedChunkWriter returns a writer that writes chunk trees to w.
 func NewCompletedChunkWriter(w io.Writer) *CompletedChunkWriter {
 	return &CompletedChunkWriter{w: w}
 }
 
-// WriteChunk writes the RIFF message to the underlying data stream.
-// It returns the number of bytes written and any error encountered that caused the write to stop early. (same as Write of io.Writer)
+// WriteChunk writes the RIFF chunk tree to the underlying data stream.
+// It returns the number of bytes written and any error encountered that caused the write to stop early.
 func (w *CompletedChunkWriter) WriteChunk(c *RIFFChunk) (int64, error) {
 	if err := validateChunk(c, true, false); err != nil {
 		return 0, err
@@ -33,16 +37,20 @@ func (w *CompletedChunkWriter) WriteChunk(c *RIFFChunk) (int64, error) {
 	return writeChunk(w.w, c, c.ByteOrder.binary(), false)
 }
 
-// IncompleteChunkWriter is a RIFF chunk writer for the incomplete chunk.
+// IncompleteChunkWriter writes chunk trees that may hold IncompleteSubChunk
+// values, whose sizes are unknown until their body streams are drained. It
+// writes the tree with placeholder sizes first, then seeks back and re-writes
+// the size fields — which is why it needs an io.WriteSeeker. It uses io.WriterAt
+// instead for the fix-up when w provides it.
 type IncompleteChunkWriter struct {
 	w io.WriteSeeker
 }
 
 var _ ChunkWriter = (*IncompleteChunkWriter)(nil)
 
-// NewIncompleteChunkWriter creates a new IncompleteChunkWriter.
+// NewIncompleteChunkWriter returns a writer that writes chunk trees to w.
+// A w that cannot actually seek is rejected here, before anything is written.
 func NewIncompleteChunkWriter(w io.WriteSeeker) (*IncompleteChunkWriter, error) {
-	// reject writers that cannot actually seek before anything is written
 	if _, err := w.Seek(0, io.SeekCurrent); err != nil {
 		return nil, fmt.Errorf("seek: %w", err)
 	}
@@ -50,8 +58,9 @@ func NewIncompleteChunkWriter(w io.WriteSeeker) (*IncompleteChunkWriter, error) 
 	return &IncompleteChunkWriter{w: w}, nil
 }
 
-// WriteChunk writes the RIFF message to the underlying data stream, and re-write the bytes of the all chunk headers size to fix incomplete body bytes by random write.
-// It returns the number of bytes written and any error encountered that caused the write to stop early. (same as Write of io.Writer)
+// WriteChunk writes the RIFF chunk tree to the underlying data stream, then seeks back
+// and re-writes every chunk size field once the incomplete bodies have been consumed.
+// It returns the number of bytes written and any error encountered that caused the write to stop early.
 func (w *IncompleteChunkWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
 	if err = validateChunk(c, true, true); err != nil {
 		return 0, err

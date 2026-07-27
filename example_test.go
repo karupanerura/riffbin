@@ -102,7 +102,8 @@ func Example_read() {
 func Example_leniency() {
 	r := bytes.NewReader(nil)
 
-	// accept a missing pad byte after an odd-sized chunk (riffbin <= v0.0.6 wrote such files)
+	// accept a missing pad byte after an odd-sized chunk (riffbin <= v0.0.6 wrote such
+	// files, and e.g. Apple CoreAudio still writes them), or a pad byte holding garbage
 	riffChunk, err := riffbin.ReadFull(r, riffbin.AllowUnpaddedChunks())
 
 	// ignore whatever follows the RIFF chunk
@@ -111,7 +112,23 @@ func Example_leniency() {
 	_, _ = riffChunk, err
 }
 
-// Example 5 of the README: RIFX (big-endian RIFF).
+// Example 5 of the README: read concatenated RIFF chunks.
+func Example_concatenated() {
+	var r io.Reader = bytes.NewReader(nil)
+
+	for {
+		riffChunk, err := riffbin.ReadFull(r, riffbin.AllowTrailingData())
+		if errors.Is(err, io.EOF) {
+			break // end of the stream
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		_ = riffChunk
+	}
+}
+
+// Example 6 of the README: RIFX (big-endian RIFF).
 func Example_rifx() {
 	var w bytes.Buffer
 	payload := []riffbin.Chunk{

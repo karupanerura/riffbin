@@ -40,8 +40,11 @@ var (
 
 // SyntaxError describes a malformed RIFF structure and where it was found.
 // It wraps ErrInvalidFormat, so errors.Is(err, ErrInvalidFormat) reports true.
+// It is reserved for defects of the input itself: an I/O failure of the
+// underlying reader is returned as is, not classified as a SyntaxError.
 type SyntaxError struct {
-	// Offset is the byte offset from the beginning of the input at which the problem was detected.
+	// Offset is the byte offset at which the problem was detected, counted
+	// from the position the reader was at when the read call was made.
 	Offset int64
 
 	// Path is the chunk path leading to the problem, e.g. `RIFF(WAVE)/LIST(INFO)`.
