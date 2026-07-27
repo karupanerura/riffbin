@@ -8,11 +8,15 @@ the chunked container behind WAVE, AVI, WebP and many other formats.
 * Builds, writes and parses RIFF chunk trees
 * Writes a chunk body straight from an `io.Reader` of unknown length, fixing the
   size fields afterwards
-* Parses in memory, or lazily from a seekable stream
-* Reads streams of concatenated RIFF chunks (the AVI 2.0 layout)
+* Parses in memory, lazily from a seekable stream, or as an iterator that builds
+  no tree at all — memory stays proportional to the nesting depth
+* Iterates parsed trees (`Walk`) and streams of concatenated RIFF chunks
+  (`Concatenated`, the AVI 2.0 layout)
 * RIFX (big-endian RIFF) in both directions
 * Strict about the specification, with opt-in leniency for files that are not
 * Ships `cmd/riffdump` to print the chunk tree of a RIFF file
+
+Requires Go 1.26.
 
 # Motivation
 
@@ -122,9 +126,11 @@ if err != nil {
 	log.Fatal(err)
 }
 
-for _, chunk := range riffChunk.Payload {
+// Walk iterates the tree in depth-first document order; break stops the walk.
+for chunk := range riffbin.Walk(riffChunk) {
 	if sub, ok := chunk.(riffbin.SubChunk); ok && sub.ChunkID() == riffbin.MustParseFourCC("data") {
 		io.Copy(os.Stdout, sub.Body())
+		break
 	}
 }
 ```
@@ -146,17 +152,11 @@ riffChunk, err = riffbin.ReadAll(r, riffbin.AllowTrailingData())
 
 ## Example 5: read concatenated RIFF chunks
 
-With `AllowTrailingData` each call consumes exactly one root chunk, so a stream of
-concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the 32-bit size field
-by appending `RIFF('AVIX')` chunks — is read by calling the reader repeatedly. An input
-that ends before the first byte of a root chunk header yields `io.EOF`.
+A stream of concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the
+32-bit size field by appending `RIFF('AVIX')` chunks — is an iterator away:
 
 ```go
-for {
-	riffChunk, err := riffbin.ReadAll(r, riffbin.AllowTrailingData())
-	if errors.Is(err, io.EOF) {
-		break // end of the stream
-	}
+for riffChunk, err := range riffbin.Concatenated(r) {
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -164,7 +164,33 @@ for {
 }
 ```
 
-## Example 6: RIFX (big-endian RIFF)
+(`Concatenated` wraps calling `ReadAll` with `AllowTrailingData` until `io.EOF`,
+which remains available when each chunk needs different handling.)
+
+## Example 6: stream chunks without building a tree
+
+`Chunks` yields every chunk in document order as the input is scanned. No tree is
+built, memory stays proportional to the nesting depth, and breaking out of the
+loop stops reading — here neither the huge `data` body nor anything after `fmt `
+is ever loaded:
+
+```go
+for info, err := range riffbin.Chunks(f) {
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !info.Grouped() && info.ID == riffbin.MustParseFourCC("fmt") {
+		fmtBody, err := io.ReadAll(info.Body) // valid until the iteration advances
+		if err != nil {
+			log.Fatal(err)
+		}
+		_ = fmtBody
+		break
+	}
+}
+```
+
+## Example 7: RIFX (big-endian RIFF)
 
 Only the size fields change; four-character codes keep their order. The variant is
 detected when reading and recorded on the chunk, so a file round-trips byte for byte.

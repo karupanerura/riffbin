@@ -3,6 +3,8 @@ package riffbin_test
 import (
 	"bytes"
 	"encoding/hex"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -140,9 +142,44 @@ func FuzzReadAllLenient(f *testing.F) {
 	})
 }
 
-// Whatever the input, ReadAll and ReadSections must agree: both accept or both
-// reject, and on success they yield the same tree. This pins the two readers to a
-// single definition of the format, in the strict and the lenient mode alike.
+// chunksFlatten consumes the streaming parser into the same flat form as
+// flattenTree, so it can be compared with the tree readers.
+func chunksFlatten(t *testing.T, r io.Reader, opts ...riffbin.ReaderOption) ([]flatChunk, error) {
+	t.Helper()
+
+	var out []flatChunk
+	var path []string
+	for info, err := range riffbin.Chunks(r, opts...) {
+		if err != nil {
+			return nil, err
+		}
+		name := info.ID.String()
+		if info.Grouped() {
+			name += "(" + info.GroupType.String() + ")"
+		}
+		path = append(path[:info.Depth], name)
+
+		fc := flatChunk{Path: "/" + strings.Join(path, "/"), ID: info.ID.String()}
+		if !info.Grouped() {
+			body, err := io.ReadAll(info.Body)
+			if err != nil {
+				return nil, err
+			}
+			if int64(len(body)) != info.BodySize {
+				t.Errorf("%s: BodySize is %d but the body holds %d byte(s)", fc.Path, info.BodySize, len(body))
+			}
+			fc.Body = string(body)
+		}
+		out = append(out, fc)
+	}
+	return out, nil
+}
+
+// Whatever the input, every reader must agree: the tree readers, the streaming
+// parser reading through, and the streaming parser skipping by seeking all
+// accept or all reject, and on success they yield the same chunks. This pins
+// them to a single definition of the format, in the strict and the lenient
+// mode alike.
 func FuzzReadersAgree(f *testing.F) {
 	for _, seed := range fuzzSeeds {
 		f.Add(seed)
@@ -157,14 +194,23 @@ func FuzzReadersAgree(f *testing.F) {
 		} {
 			full, fullErr := riffbin.ReadAll(bytes.NewReader(b), mode.opts...)
 			sections, sectionsErr := riffbin.ReadSections(bytes.NewReader(b), mode.opts...)
-			if (fullErr == nil) != (sectionsErr == nil) {
-				t.Log(hex.Dump(b))
-				t.Fatalf("%s: the readers disagree: ReadAll=%v ReadSections=%v", mode.name, fullErr, sectionsErr)
-			}
-			if fullErr == nil {
-				if df := cmp.Diff(flattenTree(t, full), flattenTree(t, sections)); df != "" {
+			streamed, streamedErr := chunksFlatten(t, struct{ io.Reader }{bytes.NewReader(b)}, mode.opts...)
+			seeked, seekedErr := chunksFlatten(t, bytes.NewReader(b), mode.opts...)
+
+			for name, err := range map[string]error{"ReadSections": sectionsErr, "Chunks": streamedErr, "Chunks(seeking)": seekedErr} {
+				if (fullErr == nil) != (err == nil) {
 					t.Log(hex.Dump(b))
-					t.Fatalf("%s: the readers disagree on the tree: %s", mode.name, df)
+					t.Fatalf("%s: the readers disagree: ReadAll=%v %s=%v", mode.name, fullErr, name, err)
+				}
+			}
+			if fullErr != nil {
+				continue
+			}
+			reference := flattenTree(t, full)
+			for name, got := range map[string][]flatChunk{"ReadSections": flattenTree(t, sections), "Chunks": streamed, "Chunks(seeking)": seeked} {
+				if df := cmp.Diff(reference, got); df != "" {
+					t.Log(hex.Dump(b))
+					t.Fatalf("%s: %s disagrees on the chunks: %s", mode.name, name, df)
 				}
 			}
 		}

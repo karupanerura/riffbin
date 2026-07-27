@@ -34,10 +34,15 @@
 // [ReadAll] accepts any io.Reader and materializes every sub-chunk body in
 // memory as an [InMemorySubChunk]. [ReadSections] needs a [ReadSeekerAt] and
 // skips the bodies, returning a [SectionSubChunk] that reads from the original
-// stream on demand; use it for files too large to hold in memory. An input that
-// ends before the first byte of the root chunk header yields io.EOF.
+// stream on demand; use it for files too large to hold in memory. [Chunks]
+// builds no tree at all: it yields every chunk in document order as the input
+// is scanned, keeping memory proportional to the nesting depth — for files
+// with too many chunks to hold even their headers, such as an AVI file, which
+// stores one chunk per video frame. [Walk] iterates the same way over an
+// already-parsed tree. An input that ends before the first byte of the root
+// chunk header yields io.EOF.
 //
-// Both readers are strict by default. Malformed input yields a [SyntaxError],
+// Every reader is strict by default. Malformed input yields a [SyntaxError],
 // which carries the byte offset and the chunk path and wraps [ErrInvalidFormat];
 // an I/O failure of the underlying reader is returned as is:
 //
@@ -51,7 +56,8 @@
 // exactly one root chunk and leaves the input right after it, so a stream of
 // concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the 32-bit
 // size field by appending RIFF("AVIX") chunks — is read by calling [ReadAll]
-// or [ReadSections] repeatedly until io.EOF.
+// or [ReadSections] repeatedly until io.EOF; [Concatenated] wraps that loop
+// as an iterator.
 //
 // # Writing
 //

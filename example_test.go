@@ -91,9 +91,11 @@ func Example_read() {
 		log.Fatal(err)
 	}
 
-	for _, chunk := range riffChunk.Payload {
+	// Walk iterates the tree in depth-first document order; break stops the walk.
+	for chunk := range riffbin.Walk(riffChunk) {
 		if sub, ok := chunk.(riffbin.SubChunk); ok && sub.ChunkID() == riffbin.MustParseFourCC("data") {
 			io.Copy(os.Stdout, sub.Body())
+			break
 		}
 	}
 }
@@ -116,11 +118,7 @@ func Example_leniency() {
 func Example_concatenated() {
 	var r io.Reader = bytes.NewReader(nil)
 
-	for {
-		riffChunk, err := riffbin.ReadAll(r, riffbin.AllowTrailingData())
-		if errors.Is(err, io.EOF) {
-			break // end of the stream
-		}
+	for riffChunk, err := range riffbin.Concatenated(r) {
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -128,7 +126,30 @@ func Example_concatenated() {
 	}
 }
 
-// Example 6 of the README: RIFX (big-endian RIFF).
+// Example 6 of the README: stream chunks without building a tree.
+func Example_streamChunks() {
+	f, err := os.Open("sample.wav")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+
+	for info, err := range riffbin.Chunks(f) {
+		if err != nil {
+			log.Fatal(err)
+		}
+		if !info.Grouped() && info.ID == riffbin.MustParseFourCC("fmt") {
+			fmtBody, err := io.ReadAll(info.Body) // valid until the iteration advances
+			if err != nil {
+				log.Fatal(err)
+			}
+			_ = fmtBody
+			break
+		}
+	}
+}
+
+// Example 7 of the README: RIFX (big-endian RIFF).
 func Example_rifx() {
 	var w bytes.Buffer
 	payload := []riffbin.Chunk{
