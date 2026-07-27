@@ -234,6 +234,21 @@ func TestIncompleteChunkWriterConsecutiveWrites(t *testing.T) {
 	})
 }
 
+// A write failure on the first pass — before any backfill — must surface as an error.
+func TestIncompleteChunkWriterReportsFirstPassError(t *testing.T) {
+	t.Parallel()
+
+	m := &memWriteSeeker{}
+	m.failWrite = func(pos int64) error { return errors.New("injected write failure") }
+	w, err := riffbin.NewIncompleteChunkWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.WriteChunk(buildIncompleteTree("abc")); err == nil {
+		t.Fatal("the write failure should be reported")
+	}
+}
+
 // A failure while backfilling the size fields must surface as an error: the file
 // holds placeholder sizes, so pretending the write succeeded would hand the caller
 // a corrupt file.
@@ -269,6 +284,39 @@ func TestIncompleteChunkWriterReportsBackfillError(t *testing.T) {
 			t.Fatal("the backfill failure should be reported")
 		}
 	})
+}
+
+// An incomplete sub-chunk whose stream turns out to be empty is a zero-sized
+// sub-chunk: the backfilled size is 0 and no pad byte is emitted.
+func TestIncompleteChunkWriterEmptyBody(t *testing.T) {
+	t.Parallel()
+
+	expected := []byte{
+		0x52, 0x49, 0x46, 0x46, // id (RIFF)
+		0x0C, 0x00, 0x00, 0x00, // body size (4 + 8 + 0)
+		0x54, 0x45, 0x53, 0x54, // type (TEST)
+		0x45, 0x4E, 0x54, 0x31, // id (ENT1)
+		0x00, 0x00, 0x00, 0x00, // body size
+	}
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewIncompleteChunkWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := w.WriteChunk(buildIncompleteTree(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != int64(len(m.buf)) {
+		t.Errorf("n should be %d but got %d", len(m.buf), n)
+	}
+	if df := cmp.Diff(expected, m.buf); df != "" {
+		t.Errorf("unexpected bytes are written: %s", df)
+	}
+	if _, err := riffbin.ReadFull(bytes.NewReader(m.buf)); err != nil {
+		t.Errorf("the written chunk does not parse: %v", err)
+	}
 }
 
 // An incomplete sub-chunk whose stream was already consumed would write a header

@@ -113,6 +113,112 @@ func TestReadFullPadding(t *testing.T) {
 			}
 		})
 	})
+	t.Run("UnpaddedFileWithList", func(t *testing.T) {
+		// in a file that omits pad bytes entirely, a LIST holding an odd-sized chunk
+		// becomes odd-sized itself, so the byte where a pad byte belongs is the head
+		// of the next chunk header — across nesting levels in both directions.
+		t.Parallel()
+
+		t.Run("NextHeaderOutsideTheList", func(t *testing.T) {
+			// the odd chunk ends exactly at the end of the LIST; the missing pad byte
+			// of the odd-sized LIST itself is followed by a sibling of the LIST
+			t.Parallel()
+			b := []byte{
+				0x52, 0x49, 0x46, 0x46, // id (RIFF)
+				0x27, 0x00, 0x00, 0x00, // body size (4 + 8 + 15 + 8 + 4), odd
+				0x54, 0x45, 0x53, 0x54, // type (TEST)
+				0x4C, 0x49, 0x53, 0x54, // id (LIST)
+				0x0F, 0x00, 0x00, 0x00, // body size (4 + 8 + 3), odd
+				0x4C, 0x53, 0x54, 0x31, // type (LST1)
+				0x45, 0x4E, 0x54, 0x31, // id (ENT1)
+				0x03, 0x00, 0x00, 0x00, // body size
+				0x61, 0x62, 0x63, // "abc" (no padding)
+				0x45, 0x4E, 0x54, 0x32, // id (ENT2), heading right where the LIST pad byte belongs
+				0x04, 0x00, 0x00, 0x00, // body size
+				0x77, 0x78, 0x79, 0x7A, // "wxyz"
+			}
+			expected := &riffbin.RIFFChunk{
+				FormType: [4]byte{'T', 'E', 'S', 'T'},
+				Payload: []riffbin.Chunk{
+					&riffbin.ListChunk{
+						ListType: [4]byte{'L', 'S', 'T', '1'},
+						Payload: []riffbin.Chunk{
+							&riffbin.OnMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '1'}, Payload: []byte("abc")},
+						},
+					},
+					&riffbin.OnMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '2'}, Payload: []byte("wxyz")},
+				},
+			}
+
+			if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("strict should be ErrInvalidFormat but got: %v", err)
+			}
+			got, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if df := cmp.Diff(expected, got); df != "" {
+				t.Errorf("diff = %s", df)
+			}
+			sections, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if df := cmp.Diff(flattenTree(t, expected), flattenTree(t, sections)); df != "" {
+				t.Errorf("ReadSections: diff = %s", df)
+			}
+		})
+
+		t.Run("NextHeaderInsideTheList", func(t *testing.T) {
+			// the odd chunk is followed by a sibling inside the same LIST, and the
+			// odd-sized LIST is the final chunk of the file
+			t.Parallel()
+			b := []byte{
+				0x52, 0x49, 0x46, 0x46, // id (RIFF)
+				0x25, 0x00, 0x00, 0x00, // body size (4 + 8 + 25), odd
+				0x54, 0x45, 0x53, 0x54, // type (TEST)
+				0x4C, 0x49, 0x53, 0x54, // id (LIST)
+				0x19, 0x00, 0x00, 0x00, // body size (4 + 8 + 3 + 8 + 2), odd
+				0x4C, 0x53, 0x54, 0x31, // type (LST1)
+				0x45, 0x4E, 0x54, 0x31, // id (ENT1)
+				0x03, 0x00, 0x00, 0x00, // body size
+				0x61, 0x62, 0x63, // "abc" (no padding)
+				0x45, 0x4E, 0x54, 0x32, // id (ENT2), heading right where the ENT1 pad byte belongs
+				0x02, 0x00, 0x00, 0x00, // body size
+				0x64, 0x65, // "de"
+			}
+			expected := &riffbin.RIFFChunk{
+				FormType: [4]byte{'T', 'E', 'S', 'T'},
+				Payload: []riffbin.Chunk{
+					&riffbin.ListChunk{
+						ListType: [4]byte{'L', 'S', 'T', '1'},
+						Payload: []riffbin.Chunk{
+							&riffbin.OnMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '1'}, Payload: []byte("abc")},
+							&riffbin.OnMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '2'}, Payload: []byte("de")},
+						},
+					},
+				},
+			}
+
+			if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("strict should be ErrInvalidFormat but got: %v", err)
+			}
+			got, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if df := cmp.Diff(expected, got); df != "" {
+				t.Errorf("diff = %s", df)
+			}
+			sections, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if df := cmp.Diff(flattenTree(t, expected), flattenTree(t, sections)); df != "" {
+				t.Errorf("ReadSections: diff = %s", df)
+			}
+		})
+	})
 	t.Run("OddFinalChunkWithoutPadding", func(t *testing.T) {
 		t.Parallel()
 		b := []byte{
@@ -203,6 +309,59 @@ func TestReadFullPadding(t *testing.T) {
 		if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 			t.Errorf("should be ErrInvalidFormat but got: %v", err)
 		}
+
+		// a printable garbage byte is indistinguishable from the head of a next chunk
+		// header, so even the lenient mode must fail rather than misread the file
+		if _, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowUnpaddedChunks()); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			t.Errorf("AllowUnpaddedChunks should still fail but got: %v", err)
+		}
+	})
+	t.Run("GarbagePadByte", func(t *testing.T) {
+		// a pad byte holding garbage instead of 0x00. the specification requires the
+		// writer to emit zero, so the strict mode reports it; the reference
+		// implementations (x/image/riff, ffmpeg, libwebp) never inspect the pad value,
+		// so the lenient mode skips it: no chunk header can start with a byte outside
+		// printable ASCII, which rules out an unpadded file.
+		t.Parallel()
+		b := []byte{
+			0x52, 0x49, 0x46, 0x46, // id (RIFF)
+			0x1C, 0x00, 0x00, 0x00, // body size (4 + 8 + 3 + 1 + 8 + 4)
+			0x54, 0x45, 0x53, 0x54, // type (TEST)
+			0x45, 0x4E, 0x54, 0x31, // id (ENT1)
+			0x03, 0x00, 0x00, 0x00, // body size
+			0x61, 0x62, 0x63, // "abc"
+			0xFF,                   // pad byte holding garbage
+			0x45, 0x4E, 0x54, 0x32, // id (ENT2)
+			0x04, 0x00, 0x00, 0x00, // body size
+			0x77, 0x78, 0x79, 0x7A, // "wxyz"
+		}
+
+		t.Run("Strict", func(t *testing.T) {
+			t.Parallel()
+			if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("should be ErrInvalidFormat but got: %v", err)
+			}
+		})
+		t.Run("AllowUnpaddedChunks", func(t *testing.T) {
+			t.Parallel()
+			got, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if df := cmp.Diff(paddedFileChunk(), got); df != "" {
+				t.Errorf("diff = %s", df)
+			}
+		})
+		t.Run("AllowUnpaddedChunksSections", func(t *testing.T) {
+			t.Parallel()
+			got, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if df := cmp.Diff(flattenTree(t, paddedFileChunk()), flattenTree(t, got)); df != "" {
+				t.Errorf("diff = %s", df)
+			}
+		})
 	})
 	t.Run("TrailingZeroAfterEvenFinalChunk", func(t *testing.T) {
 		// the single trailing 0x00 is tolerated only as the uncounted pad byte of an

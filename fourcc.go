@@ -4,8 +4,10 @@ import "fmt"
 
 // FourCC is a four-character code, used by RIFF for chunk IDs and group types.
 //
-// The specification requires it to be printable ASCII, padded on the right with
-// spaces when the meaningful name is shorter than four characters (e.g. "fmt ").
+// The specification defines it as one to four ASCII alphanumeric characters,
+// padded on the right with spaces when the meaningful name is shorter than four
+// characters (e.g. "fmt "). Identifiers in real-world files are not that tame,
+// so riffbin accepts any printable ASCII.
 type FourCC [4]byte
 
 var (
@@ -20,17 +22,22 @@ var (
 	xfirID = FourCC{'X', 'F', 'I', 'R'}
 )
 
+// String returns the four characters as a string.
 func (f FourCC) String() string { return string(f[:]) }
 
-// Valid reports whether f consists solely of printable ASCII, as the RIFF specification requires.
+// Valid reports whether f consists solely of printable ASCII, the range riffbin
+// accepts. It is wider than the alphanumeric code the specification defines, to
+// match the identifiers found in real-world files.
 func (f FourCC) Valid() bool {
 	for _, b := range f {
-		if b < 0x20 || b > 0x7E {
+		if !printableASCII(b) {
 			return false
 		}
 	}
 	return true
 }
+
+func printableASCII(b byte) bool { return 0x20 <= b && b <= 0x7E }
 
 // ParseFourCC converts s to a FourCC, padding it on the right with spaces.
 // It reports an error when s is longer than four bytes or is not printable ASCII.

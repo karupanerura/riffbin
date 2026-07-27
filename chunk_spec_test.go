@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/karupanerura/riffbin"
@@ -125,13 +126,19 @@ func TestReadersAgreeOnTruncatedInput(t *testing.T) {
 	for n := 0; n < len(b); n++ {
 		truncated := b[:n]
 
+		// truncation to nothing at all is a clean end of stream, not a malformed file
+		want := riffbin.ErrInvalidFormat
+		if n == 0 {
+			want = io.EOF
+		}
+
 		_, fullErr := riffbin.ReadFull(bytes.NewReader(truncated))
 		_, sectionsErr := riffbin.ReadSections(bytes.NewReader(truncated))
-		if !errors.Is(fullErr, riffbin.ErrInvalidFormat) {
-			t.Errorf("ReadFull(%d bytes): should be ErrInvalidFormat but got: %v", n, fullErr)
+		if !errors.Is(fullErr, want) {
+			t.Errorf("ReadFull(%d bytes): should be %v but got: %v", n, want, fullErr)
 		}
-		if !errors.Is(sectionsErr, riffbin.ErrInvalidFormat) {
-			t.Errorf("ReadSections(%d bytes): should be ErrInvalidFormat but got: %v", n, sectionsErr)
+		if !errors.Is(sectionsErr, want) {
+			t.Errorf("ReadSections(%d bytes): should be %v but got: %v", n, want, sectionsErr)
 		}
 	}
 }
@@ -235,6 +242,72 @@ func TestReadRejectsSpecViolations(t *testing.T) {
 	}
 }
 
+// A grouped chunk's body starts with its four-byte group type, so a LIST declaring
+// fewer than four bytes cannot even hold its type, and one declaring four to eleven
+// bytes has no room left for a complete sub-chunk header.
+func TestListTooSmallForItsParts(t *testing.T) {
+	t.Parallel()
+
+	build := func(listBody []byte) []byte {
+		b := []byte{'R', 'I', 'F', 'F'}
+		b = binary.LittleEndian.AppendUint32(b, uint32(4+riffbin.HeaderBytes+len(listBody)))
+		b = append(b, "TEST"...)
+		b = append(b, "LIST"...)
+		b = binary.LittleEndian.AppendUint32(b, uint32(len(listBody)))
+		return append(b, listBody...)
+	}
+
+	for n := 0; n < riffbin.TypeBytes; n++ {
+		n := n
+		t.Run(fmt.Sprintf("TooShortForGroupType%d", n), func(t *testing.T) {
+			t.Parallel()
+			b := build([]byte("LST1")[:n])
+			if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("ReadFull should be ErrInvalidFormat but got: %v", err)
+			}
+			if _, err := riffbin.ReadSections(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("ReadSections should be ErrInvalidFormat but got: %v", err)
+			}
+		})
+	}
+
+	for n := 1; n < riffbin.HeaderBytes; n++ {
+		n := n
+		t.Run(fmt.Sprintf("TooShortForSubChunkHeader%d", n), func(t *testing.T) {
+			t.Parallel()
+			b := build(append([]byte("LST1"), []byte("ENT1\x00\x00\x00\x00")[:n]...))
+			if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("ReadFull should be ErrInvalidFormat but got: %v", err)
+			}
+			if _, err := riffbin.ReadSections(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("ReadSections should be ErrInvalidFormat but got: %v", err)
+			}
+		})
+	}
+}
+
+// ReadSections must read a RIFF chunk embedded at a non-zero offset: every boundary
+// is relative to the position the reader was handed at, not to the start of the file.
+func TestReadSectionsFromNonZeroOffset(t *testing.T) {
+	t.Parallel()
+
+	prefix := []byte("leading garbage.")
+	b := append(append([]byte{}, prefix...), paddedFileBytes...)
+
+	r := bytes.NewReader(b)
+	if _, err := r.Seek(int64(len(prefix)), io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := riffbin.ReadSections(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if df := cmp.Diff(flattenTree(t, paddedFileChunk()), flattenTree(t, got)); df != "" {
+		t.Errorf("diff = %s", df)
+	}
+}
+
 func TestAllowTrailingData(t *testing.T) {
 	t.Parallel()
 
@@ -249,6 +322,53 @@ func TestAllowTrailingData(t *testing.T) {
 	if got.FormType != riffbin.MustFourCC("TEST") {
 		t.Errorf("unexpected form type: %s", got.FormType)
 	}
+}
+
+// A stream of concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the
+// 32-bit size field by appending RIFF("AVIX") chunks — is read by calling a reader
+// repeatedly with AllowTrailingData: each call consumes exactly one root chunk, and
+// the end of the stream is io.EOF.
+func TestReadConcatenatedRIFFChunks(t *testing.T) {
+	t.Parallel()
+
+	concatenated := append(append([]byte{}, paddedFileBytes...), paddedFileBytes...)
+	expected := flattenTree(t, paddedFileChunk())
+
+	t.Run("ReadFull", func(t *testing.T) {
+		t.Parallel()
+
+		r := bytes.NewReader(concatenated)
+		for i := 0; i < 2; i++ {
+			got, err := riffbin.ReadFull(r, riffbin.AllowTrailingData())
+			if err != nil {
+				t.Fatalf("chunk %d: %v", i, err)
+			}
+			if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+				t.Errorf("chunk %d: diff = %s", i, df)
+			}
+		}
+		if _, err := riffbin.ReadFull(r, riffbin.AllowTrailingData()); !errors.Is(err, io.EOF) {
+			t.Errorf("should be io.EOF at the end of the stream but got: %v", err)
+		}
+	})
+
+	t.Run("ReadSections", func(t *testing.T) {
+		t.Parallel()
+
+		r := bytes.NewReader(concatenated)
+		for i := 0; i < 2; i++ {
+			got, err := riffbin.ReadSections(r, riffbin.AllowTrailingData())
+			if err != nil {
+				t.Fatalf("chunk %d: %v", i, err)
+			}
+			if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+				t.Errorf("chunk %d: diff = %s", i, df)
+			}
+		}
+		if _, err := riffbin.ReadSections(r, riffbin.AllowTrailingData()); !errors.Is(err, io.EOF) {
+			t.Errorf("should be io.EOF at the end of the stream but got: %v", err)
+		}
+	})
 }
 
 func TestReadUnsupportedContainers(t *testing.T) {
@@ -312,6 +432,66 @@ func (c *shortSubChunk) ChunkID() riffbin.FourCC { return c.id }
 func (c *shortSubChunk) BodySize() int64         { return 10 }
 func (c *shortSubChunk) Incomplete() bool        { return false }
 func (c *shortSubChunk) Body() io.Reader         { return strings.NewReader("abc") }
+
+// A Chunk implementation reporting a negative body size cannot be encoded; the
+// writers reject the tree before writing anything.
+func TestWriteRejectsNegativeBodySize(t *testing.T) {
+	t.Parallel()
+
+	_, err := riffbin.NewCompletedChunkWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&oversizedSubChunk{id: riffbin.MustFourCC("ENT1"), size: -1},
+		},
+	})
+	if !errors.Is(err, riffbin.ErrSizeMismatch) {
+		t.Errorf("should be ErrSizeMismatch but got: %v", err)
+	}
+}
+
+// An I/O failure of the underlying reader is not a format defect: it must surface
+// as-is, never classified as ErrInvalidFormat, at whatever position it strikes.
+func TestReadPropagatesIOError(t *testing.T) {
+	t.Parallel()
+
+	errDisk := errors.New("injected read failure")
+
+	// positions: the root header, the form type, a sub-chunk header, a sub-chunk
+	// body, and the end-of-input probe after the root chunk
+	for _, n := range []int{0, 8, 12, 20, len(paddedFileBytes)} {
+		n := n
+		t.Run(fmt.Sprintf("After%dBytes", n), func(t *testing.T) {
+			t.Parallel()
+			r := io.MultiReader(bytes.NewReader(paddedFileBytes[:n]), iotest.ErrReader(errDisk))
+			_, err := riffbin.ReadFull(r)
+			if !errors.Is(err, errDisk) {
+				t.Errorf("the underlying error should be preserved but got: %v", err)
+			}
+			if errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("an I/O error must not be a format error: %v", err)
+			}
+		})
+	}
+
+	t.Run("SeekError", func(t *testing.T) {
+		t.Parallel()
+		_, err := riffbin.ReadSections(&failingSeeker{PartialReader: bytes.NewReader(paddedFileBytes), err: errDisk})
+		if !errors.Is(err, errDisk) {
+			t.Errorf("the underlying error should be preserved but got: %v", err)
+		}
+		if errors.Is(err, riffbin.ErrInvalidFormat) {
+			t.Errorf("an I/O error must not be a format error: %v", err)
+		}
+	})
+}
+
+// failingSeeker fails every Seek call.
+type failingSeeker struct {
+	riffbin.PartialReader
+	err error
+}
+
+func (f *failingSeeker) Seek(offset int64, whence int) (int64, error) { return 0, f.err }
 
 func TestWriteRejectsOversizedChunk(t *testing.T) {
 	t.Parallel()

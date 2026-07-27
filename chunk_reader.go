@@ -13,7 +13,8 @@ import (
 // Real RIFF trees are shallow; the limit keeps hostile input from exhausting the stack.
 const maxGroupDepth = 100
 
-// PartialReader is the input required by ReadSections.
+// PartialReader is the input required by ReadSections: Seek skips over the
+// sub-chunk bodies while parsing, and ReadAt serves them on demand afterwards.
 type PartialReader interface {
 	io.ReadSeeker
 	io.ReaderAt
@@ -34,28 +35,46 @@ type readerOptionFunc func(*readerConfig)
 
 func (f readerOptionFunc) apply(c *readerConfig) { f(c) }
 
-// AllowUnpaddedChunks accepts files that omit the pad byte after an odd-sized chunk body.
-// The pad byte is then consumed only when it is 0x00; any other value is taken as the first
-// byte of the next chunk header. riffbin up to v0.0.6 wrote such files.
+// AllowUnpaddedChunks accepts files whose odd-sized chunk bodies are not followed by a
+// well-formed pad byte. The byte where the pad byte belongs is then read by its value:
+// 0x00 is the pad byte; printable ASCII is taken as the first byte of the next chunk
+// header, for files that omit pad bytes entirely (riffbin up to v0.0.6 wrote such files);
+// any other value is a pad byte holding garbage and is skipped, as most RIFF
+// implementations never inspect the pad value.
 func AllowUnpaddedChunks() ReaderOption {
 	return readerOptionFunc(func(c *readerConfig) { c.allowUnpaddedChunks = true })
 }
 
-// AllowTrailingData ignores any bytes that follow the RIFF chunk instead of rejecting them.
-// Without it a single 0x00 is still tolerated after an odd-sized final chunk, because
-// writers commonly append its pad byte without counting it in the RIFF chunk size.
+// AllowTrailingData ignores any bytes that follow the RIFF chunk instead of rejecting
+// them: the call consumes exactly the root chunk and leaves the input right after it,
+// which is how a stream of concatenated RIFF chunks is read. Without it a single 0x00
+// is still tolerated after an odd-sized final chunk, because writers commonly append
+// its pad byte without counting it in the RIFF chunk size.
 func AllowTrailingData() ReaderOption {
 	return readerOptionFunc(func(c *readerConfig) { c.allowTrailingData = true })
 }
 
-// ReadFull reads RIFF binary from io.Reader.
-// It creates *RIFFChunk with *OnMemorySubChunk for sub-chunks.
+// ReadFull reads one RIFF chunk from r, materializing every sub-chunk body in
+// memory as an *OnMemorySubChunk.
+//
+// An input that ends before the first byte of the root chunk header yields
+// io.EOF. With AllowTrailingData the call consumes exactly the root chunk, so a
+// stream of concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the
+// 32-bit size field by appending RIFF("AVIX") chunks — is read by calling
+// ReadFull repeatedly until io.EOF.
 func ReadFull(r io.Reader, opts ...ReaderOption) (*RIFFChunk, error) {
 	return read(r, nil, -1, opts)
 }
 
-// ReadSections reads RIFF binary from io.ReadSeeker to use less memory than ReadFull.
-// It creates *RIFFChunk with *InStreamSubChunk for sub-chunks.
+// ReadSections reads one RIFF chunk from r, skipping over the sub-chunk bodies
+// and returning *InStreamSubChunk values that read them from r on demand; use
+// it for files too large to hold in memory. All boundaries are relative to the
+// position r is at when the call is made, so a RIFF chunk embedded mid-stream
+// can be read in place.
+//
+// Like ReadFull, it yields io.EOF when the input ends before the root chunk
+// header, and with AllowTrailingData it leaves r right after the root chunk,
+// so repeated calls read a stream of concatenated RIFF chunks.
 func ReadSections(r PartialReader, opts ...ReaderOption) (*RIFFChunk, error) {
 	// the sub-chunk bodies are skipped by seeking rather than read, so the size of the
 	// input has to be known up front to notice that it is shorter than its headers claim.
@@ -116,9 +135,16 @@ func read(r io.Reader, pr PartialReader, limit int64, opts []ReaderOption) (*RIF
 		o.apply(&p.conf)
 	}
 
-	// read header
+	// read header. a clean end of input before its first byte is io.EOF, not a syntax
+	// error, so that a stream of concatenated RIFF chunks can be read until it runs dry.
 	var buf [HeaderBytes]byte
-	if err := p.readFull(buf[:], "the root chunk header"); err != nil {
+	if _, err := io.ReadFull(p.src, buf[:]); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, io.EOF
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, p.syntaxError(0, "unexpected end of input while reading the root chunk header")
+		}
 		return nil, err
 	}
 
@@ -292,8 +318,12 @@ func (p *parser) skipPadding(id FourCC, bodyLen, end int64) error {
 		return nil
 	}
 	if p.conf.allowUnpaddedChunks {
-		// chunk IDs are printable ASCII, so a non-zero byte here is the head of the next header
-		p.pending, p.pendingByte = true, buf[0]
+		// chunk IDs are printable ASCII, so a printable byte here can head the next
+		// header of an unpadded file, while anything else can only be a pad byte
+		// holding garbage
+		if printableASCII(buf[0]) {
+			p.pending, p.pendingByte = true, buf[0]
+		}
 		return nil
 	}
 	return p.syntaxError(off, "pad byte after the odd-sized %s chunk is %#02x, want 0x00", id, buf[0])

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -14,23 +15,35 @@ import (
 
 func main() {
 	log.SetFlags(0)
-	if len(os.Args) != 2 {
-		log.Fatalf("Usage: %s RIFF-file", os.Args[0])
+	lenient := flag.Bool("lenient", false, "accept files that omit pad bytes after odd-sized chunks or carry data after the RIFF chunk")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [-lenient] RIFF-file\n", os.Args[0])
+		flag.PrintDefaults()
 	}
+	flag.Parse()
+	if flag.NArg() != 1 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	name := flag.Arg(0)
 
-	f, err := os.Open(os.Args[1])
+	f, err := os.Open(name)
 	if err != nil {
-		log.Fatalf("%s: %s", os.Args[1], err)
+		log.Fatalf("%s: %s", name, err)
 	}
 	defer f.Close()
 
-	riffChunk, err := riffbin.ReadSections(f)
+	var opts []riffbin.ReaderOption
+	if *lenient {
+		opts = append(opts, riffbin.AllowUnpaddedChunks(), riffbin.AllowTrailingData())
+	}
+	riffChunk, err := riffbin.ReadSections(f, opts...)
 	if err != nil {
 		var syntaxErr *riffbin.SyntaxError
 		if errors.As(err, &syntaxErr) {
-			log.Fatalf("%s: %s at %d in %s", os.Args[1], syntaxErr.Reason, syntaxErr.Offset, syntaxErr.Path)
+			log.Fatalf("%s: %s at %d in %s", name, syntaxErr.Reason, syntaxErr.Offset, syntaxErr.Path)
 		}
-		log.Fatalf("%s: %s", os.Args[1], err)
+		log.Fatalf("%s: %s", name, err)
 	}
 
 	dumpChunk(riffChunk, 0)

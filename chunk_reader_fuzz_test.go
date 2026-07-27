@@ -38,10 +38,28 @@ var fuzzSeeds = [][]byte{
 		'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0x00,
 	},
+	// an odd-sized chunk whose pad byte holds garbage
+	{
+		'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0xFF,
+	},
 	// big-endian RIFX
 	{
 		'R', 'I', 'F', 'X', 0x00, 0x00, 0x00, 0x10, 'T', 'E', 'S', 'T',
 		'E', 'N', 'T', '1', 0x00, 0x00, 0x00, 0x03, 'a', 'b', 'c', 0x00,
+	},
+	// big-endian RIFX without the pad byte after an odd-sized chunk
+	{
+		'R', 'I', 'F', 'X', 0x00, 0x00, 0x00, 0x1B, 'T', 'E', 'S', 'T',
+		'E', 'N', 'T', '1', 0x00, 0x00, 0x00, 0x03, 'a', 'b', 'c',
+		'E', 'N', 'T', '2', 0x00, 0x00, 0x00, 0x04, 'w', 'x', 'y', 'z',
+	},
+	// an odd-sized chunk inside an odd-sized LIST, both without pad bytes
+	{
+		'R', 'I', 'F', 'F', 0x27, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'L', 'I', 'S', 'T', 0x0F, 0x00, 0x00, 0x00, 'L', 'S', 'T', '1',
+		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c',
+		'E', 'N', 'T', '2', 0x04, 0x00, 0x00, 0x00, 'w', 'x', 'y', 'z',
 	},
 	// unsupported containers
 	{'R', 'F', '6', '4', 0x04, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E'},
@@ -118,6 +136,37 @@ func FuzzReadFullLenient(f *testing.F) {
 		// re-reads strictly to the same tree
 		if c != nil {
 			checkRoundTrip(t, b, c)
+		}
+	})
+}
+
+// Whatever the input, ReadFull and ReadSections must agree: both accept or both
+// reject, and on success they yield the same tree. This pins the two readers to a
+// single definition of the format, in the strict and the lenient mode alike.
+func FuzzReadersAgree(f *testing.F) {
+	for _, seed := range fuzzSeeds {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, b []byte) {
+		for _, mode := range []struct {
+			name string
+			opts []riffbin.ReaderOption
+		}{
+			{name: "strict"},
+			{name: "lenient", opts: []riffbin.ReaderOption{riffbin.AllowUnpaddedChunks(), riffbin.AllowTrailingData()}},
+		} {
+			full, fullErr := riffbin.ReadFull(bytes.NewReader(b), mode.opts...)
+			sections, sectionsErr := riffbin.ReadSections(bytes.NewReader(b), mode.opts...)
+			if (fullErr == nil) != (sectionsErr == nil) {
+				t.Log(hex.Dump(b))
+				t.Fatalf("%s: the readers disagree: ReadFull=%v ReadSections=%v", mode.name, fullErr, sectionsErr)
+			}
+			if fullErr == nil {
+				if df := cmp.Diff(flattenTree(t, full), flattenTree(t, sections)); df != "" {
+					t.Log(hex.Dump(b))
+					t.Fatalf("%s: the readers disagree on the tree: %s", mode.name, df)
+				}
+			}
 		}
 	})
 }

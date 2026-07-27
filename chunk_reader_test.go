@@ -116,15 +116,26 @@ func TestReadFull(t *testing.T) {
 		})
 	})
 
+	t.Run("EmptyInput", func(t *testing.T) {
+		// an input with no chunk at all is a clean end of stream, not a malformed file
+		t.Parallel()
+		c, err := riffbin.ReadFull(bytes.NewReader(nil))
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("should be io.EOF but got: %v", err)
+		}
+		if c != nil {
+			t.Error("riff chunk should be nil")
+		}
+	})
+
 	t.Run("InvalidFormat", func(t *testing.T) {
 		t.Parallel()
 		for _, tt := range []struct {
 			Name  string
 			Bytes []byte
 		}{
-			{"EmptyInput", []byte{}},
 			{"TooShortRIFFID", []byte("RIF")},
-			{"InvalidRIFFID", []byte("LIFF")},
+			{"InvalidRIFFID", []byte{'L', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D'}},
 			{"TooShortSize", []byte{'R', 'I', 'F', 'F', 0x04, 0x00, 0x00}},
 			{"TooShortType", []byte{'R', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'X', 'X', 'X'}},
 			{"TooLargeTotalSize", []byte{'R', 'I', 'F', 'F', 0x05, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D'}},
@@ -133,6 +144,7 @@ func TestReadFull(t *testing.T) {
 			{"TooShortSubChunkPayloadBySubChunkSize", []byte{'R', 'I', 'F', 'F', 0x08, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x01, 0x00, 0x00, 0x00}},
 			{"TooLongSubChunkPayloadByTotalSize", []byte{'R', 'I', 'F', 'F', 0x09, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x02, 0x00, 0x00, 0x00, 'A', 'B'}},
 			{"TooLongSubChunkPayloadBySubChunkSize", []byte{'R', 'I', 'F', 'F', 0x0A, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x01, 0x00, 0x00, 0x00, 'A', 'B'}},
+			{"SubChunkBodyExceedsParent", []byte{'R', 'I', 'F', 'F', 0x0C, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x01, 0x00, 0x00, 0x00}},
 		} {
 			tt := tt
 			t.Run(tt.Name, func(t *testing.T) {
@@ -154,7 +166,12 @@ func TestReadFull(t *testing.T) {
 			const binary = "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"
 			decoder := base64.NewDecoder(base64.StdEncoding, strings.NewReader(binary))
 			_, err := riffbin.ReadFull(io.LimitReader(decoder, lim))
-			if !errors.Is(err, riffbin.ErrInvalidFormat) {
+			if lim == 0 {
+				// nothing at all is a clean end of stream
+				if !errors.Is(err, io.EOF) {
+					t.Errorf("unexpected error: %v", err)
+				}
+			} else if !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("unexpected error: %v", err)
 			}
 		}
@@ -307,15 +324,26 @@ func TestReadSections(t *testing.T) {
 		})
 	})
 
+	t.Run("EmptyInput", func(t *testing.T) {
+		// an input with no chunk at all is a clean end of stream, not a malformed file
+		t.Parallel()
+		c, err := riffbin.ReadSections(bytes.NewReader(nil))
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("should be io.EOF but got: %v", err)
+		}
+		if c != nil {
+			t.Error("riff chunk should be nil")
+		}
+	})
+
 	t.Run("InvalidFormat", func(t *testing.T) {
 		t.Parallel()
 		for _, tt := range []struct {
 			Name  string
 			Bytes []byte
 		}{
-			{"EmptyInput", []byte{}},
 			{"TooShortRIFFID", []byte("RIF")},
-			{"InvalidRIFFID", []byte("LIFF")},
+			{"InvalidRIFFID", []byte{'L', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D'}},
 			{"TooShortSize", []byte{'R', 'I', 'F', 'F', 0x04, 0x00, 0x00}},
 			{"TooShortType", []byte{'R', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'X', 'X', 'X'}},
 			{"TooLargeTotalSize", []byte{'R', 'I', 'F', 'F', 0x05, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D'}},
@@ -324,6 +352,7 @@ func TestReadSections(t *testing.T) {
 			{"TooShortSubChunkPayloadBySubChunkSize", []byte{'R', 'I', 'F', 'F', 0x08, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x01, 0x00, 0x00, 0x00}},
 			{"TooLongSubChunkPayloadByTotalSize", []byte{'R', 'I', 'F', 'F', 0x09, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x02, 0x00, 0x00, 0x00, 'A', 'B'}},
 			{"TooLongSubChunkPayloadBySubChunkSize", []byte{'R', 'I', 'F', 'F', 0x0A, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x01, 0x00, 0x00, 0x00, 'A', 'B'}},
+			{"SubChunkBodyExceedsParent", []byte{'R', 'I', 'F', 'F', 0x0C, 0x00, 0x00, 0x00, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 0x01, 0x00, 0x00, 0x00}},
 		} {
 			tt := tt
 			t.Run(tt.Name, func(t *testing.T) {

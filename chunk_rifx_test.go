@@ -3,6 +3,7 @@ package riffbin_test
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -112,6 +113,37 @@ func TestRIFXRoundTrip(t *testing.T) {
 				t.Errorf("round trip differs: %s", df)
 			}
 		})
+	}
+}
+
+// The incomplete writer must backfill the size fields in the byte order of the tree
+// it wrote: a RIFX tree gets big-endian sizes both on the first pass and on the fix-up.
+func TestRIFXIncompleteWrite(t *testing.T) {
+	t.Parallel()
+
+	tree := &riffbin.RIFFChunk{
+		ByteOrder: riffbin.BigEndian,
+		FormType:  riffbin.MustFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			riffbin.NewIncompleteSubChunk(riffbin.MustFourCC("ENT1"), strings.NewReader("abc")),
+			&riffbin.OnMemorySubChunk{ID: riffbin.MustFourCC("ENT2"), Payload: []byte("wxyz")},
+		},
+	}
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewIncompleteChunkWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := w.WriteChunk(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != int64(len(m.buf)) {
+		t.Errorf("n should be %d but got %d", len(m.buf), n)
+	}
+	if df := cmp.Diff(rifxFileBytes, m.buf); df != "" {
+		t.Errorf("unexpected bytes are written: %s", df)
 	}
 }
 
