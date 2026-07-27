@@ -19,11 +19,11 @@ func Example_writeWaveFile() {
 	var w bytes.Buffer
 	pcm := []byte{0x80, 0x80, 0x80, 0x80}
 
-	_, err := riffbin.NewCompletedChunkWriter(&w).WriteChunk(&riffbin.RIFFChunk{
-		FormType: riffbin.MustFourCC("WAVE"),
+	_, err := riffbin.NewWriter(&w).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("WAVE"),
 		Payload: []riffbin.Chunk{
-			&riffbin.OnMemorySubChunk{
-				ID: riffbin.MustFourCC("fmt"),
+			&riffbin.InMemorySubChunk{
+				ID: riffbin.MustParseFourCC("fmt"),
 				Payload: []byte{
 					0x01, 0x00, // Compression Code (Linear PCM)
 					0x01, 0x00, // Number of channels (Monoral)
@@ -33,8 +33,8 @@ func Example_writeWaveFile() {
 					0x08, 0x00, // Significant bits per sample (8bit)
 				},
 			},
-			&riffbin.OnMemorySubChunk{
-				ID:      riffbin.MustFourCC("data"),
+			&riffbin.InMemorySubChunk{
+				ID:      riffbin.MustParseFourCC("data"),
 				Payload: pcm, // []byte
 			},
 		},
@@ -54,19 +54,19 @@ func Example_writeFromReader() {
 	fmtChunkPayload := []byte{0x01, 0x00, 0x01, 0x00, 0x44, 0xAC, 0x00, 0x00, 0x44, 0xAC, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00}
 	r := strings.NewReader("pcm bytes of unknown length")
 
-	w, err := riffbin.NewIncompleteChunkWriter(f)
+	w, err := riffbin.NewStreamingWriter(f)
 	if err != nil {
 		panic(err)
 	}
 
 	_, err = w.WriteChunk(&riffbin.RIFFChunk{
-		FormType: riffbin.MustFourCC("WAVE"),
+		FormType: riffbin.MustParseFourCC("WAVE"),
 		Payload: []riffbin.Chunk{
-			&riffbin.OnMemorySubChunk{
-				ID:      riffbin.MustFourCC("fmt"),
+			&riffbin.InMemorySubChunk{
+				ID:      riffbin.MustParseFourCC("fmt"),
 				Payload: fmtChunkPayload,
 			},
-			riffbin.NewIncompleteSubChunk(riffbin.MustFourCC("data"), r),
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("data"), r),
 		},
 	})
 	if err != nil {
@@ -92,7 +92,7 @@ func Example_read() {
 	}
 
 	for _, chunk := range riffChunk.Payload {
-		if sub, ok := chunk.(riffbin.SubChunk); ok && sub.ChunkID() == riffbin.MustFourCC("data") {
+		if sub, ok := chunk.(riffbin.SubChunk); ok && sub.ChunkID() == riffbin.MustParseFourCC("data") {
 			io.Copy(os.Stdout, sub.Body())
 		}
 	}
@@ -104,10 +104,10 @@ func Example_leniency() {
 
 	// accept a missing pad byte after an odd-sized chunk (riffbin <= v0.0.6 wrote such
 	// files, and e.g. Apple CoreAudio still writes them), or a pad byte holding garbage
-	riffChunk, err := riffbin.ReadFull(r, riffbin.AllowUnpaddedChunks())
+	riffChunk, err := riffbin.ReadAll(r, riffbin.AllowPaddingViolations())
 
 	// ignore whatever follows the RIFF chunk
-	riffChunk, err = riffbin.ReadFull(r, riffbin.AllowTrailingData())
+	riffChunk, err = riffbin.ReadAll(r, riffbin.AllowTrailingData())
 
 	_, _ = riffChunk, err
 }
@@ -117,7 +117,7 @@ func Example_concatenated() {
 	var r io.Reader = bytes.NewReader(nil)
 
 	for {
-		riffChunk, err := riffbin.ReadFull(r, riffbin.AllowTrailingData())
+		riffChunk, err := riffbin.ReadAll(r, riffbin.AllowTrailingData())
 		if errors.Is(err, io.EOF) {
 			break // end of the stream
 		}
@@ -132,12 +132,12 @@ func Example_concatenated() {
 func Example_rifx() {
 	var w bytes.Buffer
 	payload := []riffbin.Chunk{
-		&riffbin.OnMemorySubChunk{ID: riffbin.MustFourCC("ENT1"), Payload: []byte("abc")},
+		&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT1"), Payload: []byte("abc")},
 	}
 
-	_, err := riffbin.NewCompletedChunkWriter(&w).WriteChunk(&riffbin.RIFFChunk{
+	_, err := riffbin.NewWriter(&w).WriteChunk(&riffbin.RIFFChunk{
 		ByteOrder: riffbin.BigEndian,
-		FormType:  riffbin.MustFourCC("TEST"),
+		FormType:  riffbin.MustParseFourCC("TEST"),
 		Payload:   payload,
 	})
 	if err != nil {

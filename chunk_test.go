@@ -56,7 +56,7 @@ func TestFourCC(t *testing.T) {
 	})
 	t.Run("String", func(t *testing.T) {
 		t.Parallel()
-		if got := riffbin.MustFourCC("fmt").String(); got != "fmt " {
+		if got := riffbin.MustParseFourCC("fmt").String(); got != "fmt " {
 			t.Errorf("unexpected string: %q", got)
 		}
 	})
@@ -69,14 +69,14 @@ func TestFourCC(t *testing.T) {
 			t.Error("a NUL byte should be invalid")
 		}
 	})
-	t.Run("MustFourCCPanics", func(t *testing.T) {
+	t.Run("MustParseFourCCPanics", func(t *testing.T) {
 		t.Parallel()
 		defer func() {
 			if recover() == nil {
-				t.Error("MustFourCC should panic on an invalid four-character code")
+				t.Error("MustParseFourCC should panic on an invalid four-character code")
 			}
 		}()
-		riffbin.MustFourCC("TOOLONG")
+		riffbin.MustParseFourCC("TOOLONG")
 	})
 }
 
@@ -100,11 +100,11 @@ func TestSyntaxErrorMessage(t *testing.T) {
 
 func TestRIFFChunk(t *testing.T) {
 	ent1 := &basicChunk{
-		id:       riffbin.MustFourCC("ENT1"),
+		id:       riffbin.MustParseFourCC("ENT1"),
 		bodySize: 17,
 	}
 	ent2 := &basicChunk{
-		id:       riffbin.MustFourCC("ENT2"),
+		id:       riffbin.MustParseFourCC("ENT2"),
 		bodySize: 11,
 	}
 	chunk := riffbin.RIFFChunk{
@@ -112,7 +112,7 @@ func TestRIFFChunk(t *testing.T) {
 		Payload:  []riffbin.Chunk{ent1, ent2},
 	}
 
-	if chunk.ChunkID() != riffbin.MustFourCC("RIFF") {
+	if chunk.ChunkID() != riffbin.MustParseFourCC("RIFF") {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
 	}
 	// 4 (form type) + 8 + 17 + 1 (padding) + 8 + 11 + 1 (padding)
@@ -127,7 +127,7 @@ func TestRIFXChunkID(t *testing.T) {
 		FormType:  [4]byte{'A', 'B', 'C', 'D'},
 	}
 
-	if chunk.ChunkID() != riffbin.MustFourCC("RIFX") {
+	if chunk.ChunkID() != riffbin.MustParseFourCC("RIFX") {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
 	}
 }
@@ -137,17 +137,17 @@ func TestListChunk(t *testing.T) {
 		ListType: [4]byte{'A', 'B', 'C', 'D'},
 		Payload: []riffbin.Chunk{
 			&basicChunk{
-				id:       riffbin.MustFourCC("ENT1"),
+				id:       riffbin.MustParseFourCC("ENT1"),
 				bodySize: 11,
 			},
 			&basicChunk{
-				id:       riffbin.MustFourCC("ENT2"),
+				id:       riffbin.MustParseFourCC("ENT2"),
 				bodySize: 17,
 			},
 		},
 	}
 
-	if chunk.ChunkID() != riffbin.MustFourCC("LIST") {
+	if chunk.ChunkID() != riffbin.MustParseFourCC("LIST") {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
 	}
 	// 4 (list type) + 8 + 11 + 1 (padding) + 8 + 17 + 1 (padding)
@@ -160,10 +160,10 @@ func TestListChunk(t *testing.T) {
 func TestWriteUnsupportedChunkType(t *testing.T) {
 	t.Parallel()
 
-	_, err := riffbin.NewCompletedChunkWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
+	_, err := riffbin.NewWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
 		FormType: [4]byte{'T', 'E', 'S', 'T'},
 		Payload: []riffbin.Chunk{
-			&basicChunk{id: riffbin.MustFourCC("ENT1"), bodySize: 4},
+			&basicChunk{id: riffbin.MustParseFourCC("ENT1"), bodySize: 4},
 		},
 	})
 	if !errors.Is(err, riffbin.ErrUnsupportedChunkType) {
@@ -171,13 +171,13 @@ func TestWriteUnsupportedChunkType(t *testing.T) {
 	}
 }
 
-func TestOnMemorySubChunk(t *testing.T) {
-	chunk := riffbin.OnMemorySubChunk{
+func TestInMemorySubChunk(t *testing.T) {
+	chunk := riffbin.InMemorySubChunk{
 		ID:      [4]byte{'A', 'B', 'C', 'D'},
 		Payload: []byte("foobar"),
 	}
 
-	if chunk.ChunkID() != riffbin.MustFourCC("ABCD") {
+	if chunk.ChunkID() != riffbin.MustParseFourCC("ABCD") {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
 	}
 	if chunk.BodySize() != 6 {
@@ -219,17 +219,17 @@ func (s *fakeSeeker) Seek(offset int64, whence int) (int64, error) {
 	panic("should not reach here")
 }
 
-func TestIncompleteSubChunk(t *testing.T) {
-	chunk := riffbin.NewIncompleteSubChunk([4]byte{'A', 'B', 'C', 'D'}, strings.NewReader("foobar"))
+func TestStreamingSubChunk(t *testing.T) {
+	chunk := riffbin.NewStreamingSubChunk([4]byte{'A', 'B', 'C', 'D'}, strings.NewReader("foobar"))
 
-	if chunk.ChunkID() != riffbin.MustFourCC("ABCD") {
+	if chunk.ChunkID() != riffbin.MustParseFourCC("ABCD") {
 		t.Errorf("unexpected id: %s", chunk.ChunkID())
 	}
 	if chunk.BodySize() != 0 {
 		t.Errorf("unexpected body size: %d", chunk.BodySize())
 	}
 
-	w, err := riffbin.NewIncompleteChunkWriter(&fakeSeeker{Writer: io.Discard})
+	w, err := riffbin.NewStreamingWriter(&fakeSeeker{Writer: io.Discard})
 	if err != nil {
 		panic(err)
 	}
@@ -247,11 +247,11 @@ func TestIncompleteSubChunk(t *testing.T) {
 	}
 }
 
-// the body of an incomplete sub-chunk counts what it hands out, however it is consumed
-func TestIncompleteSubChunkBodyTracksReads(t *testing.T) {
+// the body of a streaming sub-chunk counts what it hands out, however it is consumed
+func TestStreamingSubChunkBodyTracksReads(t *testing.T) {
 	t.Parallel()
 
-	chunk := riffbin.NewIncompleteSubChunk([4]byte{'A', 'B', 'C', 'D'}, strings.NewReader("foobar"))
+	chunk := riffbin.NewStreamingSubChunk([4]byte{'A', 'B', 'C', 'D'}, strings.NewReader("foobar"))
 
 	buf := make([]byte, 3)
 	if _, err := io.ReadFull(chunk.Body(), buf); err != nil {

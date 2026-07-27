@@ -29,11 +29,11 @@ func paddedFileChunk() *riffbin.RIFFChunk {
 	return &riffbin.RIFFChunk{
 		FormType: [4]byte{'T', 'E', 'S', 'T'},
 		Payload: []riffbin.Chunk{
-			&riffbin.OnMemorySubChunk{
+			&riffbin.InMemorySubChunk{
 				ID:      [4]byte{'E', 'N', 'T', '1'},
 				Payload: []byte("abc"),
 			},
-			&riffbin.OnMemorySubChunk{
+			&riffbin.InMemorySubChunk{
 				ID:      [4]byte{'E', 'N', 'T', '2'},
 				Payload: []byte("wxyz"),
 			},
@@ -41,11 +41,11 @@ func paddedFileChunk() *riffbin.RIFFChunk {
 	}
 }
 
-func TestCompletedChunkWriterPadsOddChunk(t *testing.T) {
+func TestWriterPadsOddChunk(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	n, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(paddedFileChunk())
+	n, err := riffbin.NewWriter(&buf).WriteChunk(paddedFileChunk())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,11 +57,11 @@ func TestCompletedChunkWriterPadsOddChunk(t *testing.T) {
 	}
 }
 
-func TestReadFullPadding(t *testing.T) {
+func TestReadAllPadding(t *testing.T) {
 	t.Parallel()
 	t.Run("PaddedFile", func(t *testing.T) {
 		t.Parallel()
-		got, err := riffbin.ReadFull(bytes.NewReader(paddedFileBytes))
+		got, err := riffbin.ReadAll(bytes.NewReader(paddedFileBytes))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -72,7 +72,7 @@ func TestReadFullPadding(t *testing.T) {
 	t.Run("LegacyUnpaddedFile", func(t *testing.T) {
 		// riffbin up to v0.0.6 wrote no padding byte after odd-sized chunks.
 		// Such files violate the specification, so they are rejected unless
-		// AllowUnpaddedChunks is given.
+		// AllowPaddingViolations is given.
 		t.Parallel()
 		legacy := []byte{
 			0x52, 0x49, 0x46, 0x46, // id (RIFF)
@@ -88,13 +88,13 @@ func TestReadFullPadding(t *testing.T) {
 
 		t.Run("Strict", func(t *testing.T) {
 			t.Parallel()
-			if _, err := riffbin.ReadFull(bytes.NewReader(legacy)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			if _, err := riffbin.ReadAll(bytes.NewReader(legacy)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("should be ErrInvalidFormat but got: %v", err)
 			}
 		})
-		t.Run("AllowUnpaddedChunks", func(t *testing.T) {
+		t.Run("AllowPaddingViolations", func(t *testing.T) {
 			t.Parallel()
-			got, err := riffbin.ReadFull(bytes.NewReader(legacy), riffbin.AllowUnpaddedChunks())
+			got, err := riffbin.ReadAll(bytes.NewReader(legacy), riffbin.AllowPaddingViolations())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -102,9 +102,9 @@ func TestReadFullPadding(t *testing.T) {
 				t.Errorf("diff = %s", df)
 			}
 		})
-		t.Run("AllowUnpaddedChunksSections", func(t *testing.T) {
+		t.Run("AllowPaddingViolationsSections", func(t *testing.T) {
 			t.Parallel()
-			got, err := riffbin.ReadSections(bytes.NewReader(legacy), riffbin.AllowUnpaddedChunks())
+			got, err := riffbin.ReadSections(bytes.NewReader(legacy), riffbin.AllowPaddingViolations())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -143,24 +143,24 @@ func TestReadFullPadding(t *testing.T) {
 					&riffbin.ListChunk{
 						ListType: [4]byte{'L', 'S', 'T', '1'},
 						Payload: []riffbin.Chunk{
-							&riffbin.OnMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '1'}, Payload: []byte("abc")},
+							&riffbin.InMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '1'}, Payload: []byte("abc")},
 						},
 					},
-					&riffbin.OnMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '2'}, Payload: []byte("wxyz")},
+					&riffbin.InMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '2'}, Payload: []byte("wxyz")},
 				},
 			}
 
-			if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("strict should be ErrInvalidFormat but got: %v", err)
 			}
-			got, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowPaddingViolations())
 			if err != nil {
 				t.Fatal(err)
 			}
 			if df := cmp.Diff(expected, got); df != "" {
 				t.Errorf("diff = %s", df)
 			}
-			sections, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			sections, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowPaddingViolations())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -193,24 +193,24 @@ func TestReadFullPadding(t *testing.T) {
 					&riffbin.ListChunk{
 						ListType: [4]byte{'L', 'S', 'T', '1'},
 						Payload: []riffbin.Chunk{
-							&riffbin.OnMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '1'}, Payload: []byte("abc")},
-							&riffbin.OnMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '2'}, Payload: []byte("de")},
+							&riffbin.InMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '1'}, Payload: []byte("abc")},
+							&riffbin.InMemorySubChunk{ID: [4]byte{'E', 'N', 'T', '2'}, Payload: []byte("de")},
 						},
 					},
 				},
 			}
 
-			if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("strict should be ErrInvalidFormat but got: %v", err)
 			}
-			got, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowPaddingViolations())
 			if err != nil {
 				t.Fatal(err)
 			}
 			if df := cmp.Diff(expected, got); df != "" {
 				t.Errorf("diff = %s", df)
 			}
-			sections, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			sections, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowPaddingViolations())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -230,7 +230,7 @@ func TestReadFullPadding(t *testing.T) {
 			0x61, 0x62, 0x63, // "abc" (no padding at EOF)
 		}
 
-		got, err := riffbin.ReadFull(bytes.NewReader(b))
+		got, err := riffbin.ReadAll(bytes.NewReader(b))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -250,7 +250,7 @@ func TestReadFullPadding(t *testing.T) {
 			0x00, // padding
 		}
 
-		got, err := riffbin.ReadFull(bytes.NewReader(b))
+		got, err := riffbin.ReadAll(bytes.NewReader(b))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -271,7 +271,7 @@ func TestReadFullPadding(t *testing.T) {
 			0x00, // padding outside of the RIFF chunk size
 		}
 
-		got, err := riffbin.ReadFull(bytes.NewReader(b))
+		got, err := riffbin.ReadAll(bytes.NewReader(b))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -290,7 +290,7 @@ func TestReadFullPadding(t *testing.T) {
 			0x61, 0x62, 0x63, // "abc" (the padding byte counted in the RIFF size is missing)
 		}
 
-		if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+		if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 			t.Errorf("should be ErrInvalidFormat but got: %v", err)
 		}
 	})
@@ -306,14 +306,14 @@ func TestReadFullPadding(t *testing.T) {
 			0x41, // garbage where the padding or a next chunk header is expected
 		}
 
-		if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+		if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 			t.Errorf("should be ErrInvalidFormat but got: %v", err)
 		}
 
 		// a printable garbage byte is indistinguishable from the head of a next chunk
 		// header, so even the lenient mode must fail rather than misread the file
-		if _, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowUnpaddedChunks()); !errors.Is(err, riffbin.ErrInvalidFormat) {
-			t.Errorf("AllowUnpaddedChunks should still fail but got: %v", err)
+		if _, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowPaddingViolations()); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			t.Errorf("AllowPaddingViolations should still fail but got: %v", err)
 		}
 	})
 	t.Run("GarbagePadByte", func(t *testing.T) {
@@ -338,13 +338,13 @@ func TestReadFullPadding(t *testing.T) {
 
 		t.Run("Strict", func(t *testing.T) {
 			t.Parallel()
-			if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("should be ErrInvalidFormat but got: %v", err)
 			}
 		})
-		t.Run("AllowUnpaddedChunks", func(t *testing.T) {
+		t.Run("AllowPaddingViolations", func(t *testing.T) {
 			t.Parallel()
-			got, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowPaddingViolations())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -352,9 +352,9 @@ func TestReadFullPadding(t *testing.T) {
 				t.Errorf("diff = %s", df)
 			}
 		})
-		t.Run("AllowUnpaddedChunksSections", func(t *testing.T) {
+		t.Run("AllowPaddingViolationsSections", func(t *testing.T) {
 			t.Parallel()
-			got, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowUnpaddedChunks())
+			got, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowPaddingViolations())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -369,10 +369,10 @@ func TestReadFullPadding(t *testing.T) {
 		t.Parallel()
 		b := append(append([]byte{}, paddedFileBytes...), 0x00)
 
-		if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+		if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 			t.Errorf("should be ErrInvalidFormat but got: %v", err)
 		}
-		if _, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowTrailingData()); err != nil {
+		if _, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowTrailingData()); err != nil {
 			t.Errorf("AllowTrailingData should accept it but got: %v", err)
 		}
 	})
@@ -388,7 +388,7 @@ func TestReadFullPadding(t *testing.T) {
 			0x00, 0x00, // the uncounted pad byte plus one stray zero
 		}
 
-		if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+		if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 			t.Errorf("should be ErrInvalidFormat but got: %v", err)
 		}
 	})
@@ -407,7 +407,7 @@ func TestReadFullPadding(t *testing.T) {
 			0x00, // padding
 		}
 
-		got, err := riffbin.ReadFull(bytes.NewReader(b))
+		got, err := riffbin.ReadAll(bytes.NewReader(b))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -418,7 +418,7 @@ func TestReadFullPadding(t *testing.T) {
 				&riffbin.ListChunk{
 					ListType: [4]byte{'L', 'S', 'T', '1'},
 					Payload: []riffbin.Chunk{
-						&riffbin.OnMemorySubChunk{
+						&riffbin.InMemorySubChunk{
 							ID:      [4]byte{'E', 'N', 'T', '1'},
 							Payload: []byte("abc"),
 						},
@@ -444,9 +444,9 @@ func TestReadSectionsPadding(t *testing.T) {
 	}
 
 	for i, expected := range []string{"abc", "wxyz"} {
-		subChunk, ok := got.Payload[i].(*riffbin.InStreamSubChunk)
+		subChunk, ok := got.Payload[i].(*riffbin.SectionSubChunk)
 		if !ok {
-			t.Fatalf("payload[%d] should be *riffbin.InStreamSubChunk but got: %T", i, got.Payload[i])
+			t.Fatalf("payload[%d] should be *riffbin.SectionSubChunk but got: %T", i, got.Payload[i])
 		}
 
 		body, err := io.ReadAll(subChunk)
@@ -468,17 +468,17 @@ func TestRoundTripOddChunks(t *testing.T) {
 			&riffbin.ListChunk{
 				ListType: [4]byte{'L', 'S', 'T', '1'},
 				Payload: []riffbin.Chunk{
-					&riffbin.OnMemorySubChunk{
+					&riffbin.InMemorySubChunk{
 						ID:      [4]byte{'E', 'N', 'T', '1'},
 						Payload: []byte{0x01},
 					},
 				},
 			},
-			&riffbin.OnMemorySubChunk{
+			&riffbin.InMemorySubChunk{
 				ID:      [4]byte{'E', 'N', 'T', '2'},
 				Payload: []byte{0x01, 0x02, 0x03, 0x04, 0x05},
 			},
-			&riffbin.OnMemorySubChunk{
+			&riffbin.InMemorySubChunk{
 				ID:      [4]byte{'E', 'N', 'T', '3'},
 				Payload: []byte{0x01, 0x02},
 			},
@@ -486,11 +486,11 @@ func TestRoundTripOddChunks(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if _, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(riffChunk); err != nil {
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(riffChunk); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := riffbin.ReadFull(&buf)
+	got, err := riffbin.ReadAll(&buf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +499,7 @@ func TestRoundTripOddChunks(t *testing.T) {
 	}
 }
 
-func TestIncompleteChunkWriterPadsOddChunk(t *testing.T) {
+func TestStreamingWriterPadsOddChunk(t *testing.T) {
 	t.Parallel()
 
 	// the size backfill offsets must account for padding bytes written before later chunks
@@ -507,8 +507,8 @@ func TestIncompleteChunkWriterPadsOddChunk(t *testing.T) {
 		return &riffbin.RIFFChunk{
 			FormType: [4]byte{'T', 'E', 'S', 'T'},
 			Payload: []riffbin.Chunk{
-				riffbin.NewIncompleteSubChunk([4]byte{'E', 'N', 'T', '1'}, strings.NewReader("abc")),
-				&riffbin.OnMemorySubChunk{
+				riffbin.NewStreamingSubChunk([4]byte{'E', 'N', 'T', '1'}, strings.NewReader("abc")),
+				&riffbin.InMemorySubChunk{
 					ID:      [4]byte{'E', 'N', 'T', '2'},
 					Payload: []byte("wxyz"),
 				},
@@ -524,7 +524,7 @@ func TestIncompleteChunkWriterPadsOddChunk(t *testing.T) {
 		}
 		defer os.Remove(f.Name())
 
-		w, err := riffbin.NewIncompleteChunkWriter(f)
+		w, err := riffbin.NewStreamingWriter(f)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -556,7 +556,7 @@ func TestIncompleteChunkWriterPadsOddChunk(t *testing.T) {
 		}
 		defer os.Remove(f.Name())
 
-		w, err := riffbin.NewIncompleteChunkWriter(&pureWriteSeeker{W: f})
+		w, err := riffbin.NewStreamingWriter(&pureWriteSeeker{W: f})
 		if err != nil {
 			t.Fatal(err)
 		}

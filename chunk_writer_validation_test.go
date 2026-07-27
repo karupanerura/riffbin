@@ -63,11 +63,11 @@ func (f *failingWriterAt) WriteAt(p []byte, off int64) (int, error) {
 	return 0, errors.New("injected WriteAt failure")
 }
 
-func buildIncompleteTree(payload string) *riffbin.RIFFChunk {
+func buildStreamingTree(payload string) *riffbin.RIFFChunk {
 	return &riffbin.RIFFChunk{
-		FormType: riffbin.MustFourCC("TEST"),
+		FormType: riffbin.MustParseFourCC("TEST"),
 		Payload: []riffbin.Chunk{
-			riffbin.NewIncompleteSubChunk(riffbin.MustFourCC("ENT1"), strings.NewReader(payload)),
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("ENT1"), strings.NewReader(payload)),
 		},
 	}
 }
@@ -82,33 +82,33 @@ func TestWriterValidatesTreeBeforeWriting(t *testing.T) {
 		tree *riffbin.RIFFChunk
 	}{
 		{"NonASCIIChunkID", &riffbin.RIFFChunk{
-			FormType: riffbin.MustFourCC("TEST"),
-			Payload:  []riffbin.Chunk{&riffbin.OnMemorySubChunk{ID: riffbin.FourCC{0x01, 0x02, 0x03, 0x04}, Payload: []byte("xy")}},
+			FormType: riffbin.MustParseFourCC("TEST"),
+			Payload:  []riffbin.Chunk{&riffbin.InMemorySubChunk{ID: riffbin.FourCC{0x01, 0x02, 0x03, 0x04}, Payload: []byte("xy")}},
 		}},
 		{"NonASCIIFormType", &riffbin.RIFFChunk{
 			FormType: riffbin.FourCC{0xFF, 'A', 'B', 'C'},
 		}},
 		{"NonASCIIListType", &riffbin.RIFFChunk{
-			FormType: riffbin.MustFourCC("TEST"),
+			FormType: riffbin.MustParseFourCC("TEST"),
 			Payload:  []riffbin.Chunk{&riffbin.ListChunk{ListType: riffbin.FourCC{0xFF, 'A', 'B', 'C'}}},
 		}},
 		{"SubChunkWithLISTID", &riffbin.RIFFChunk{
-			FormType: riffbin.MustFourCC("TEST"),
-			Payload:  []riffbin.Chunk{&riffbin.OnMemorySubChunk{ID: riffbin.MustFourCC("LIST"), Payload: []byte("ab")}},
+			FormType: riffbin.MustParseFourCC("TEST"),
+			Payload:  []riffbin.Chunk{&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("LIST"), Payload: []byte("ab")}},
 		}},
 		{"SubChunkWithRIFFID", &riffbin.RIFFChunk{
-			FormType: riffbin.MustFourCC("TEST"),
-			Payload:  []riffbin.Chunk{&riffbin.OnMemorySubChunk{ID: riffbin.MustFourCC("RIFF"), Payload: []byte("abcd")}},
+			FormType: riffbin.MustParseFourCC("TEST"),
+			Payload:  []riffbin.Chunk{&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("RIFF"), Payload: []byte("abcd")}},
 		}},
 		{"NestedRIFFChunk", &riffbin.RIFFChunk{
-			FormType: riffbin.MustFourCC("TEST"),
-			Payload:  []riffbin.Chunk{&riffbin.RIFFChunk{FormType: riffbin.MustFourCC("NEST")}},
+			FormType: riffbin.MustParseFourCC("TEST"),
+			Payload:  []riffbin.Chunk{&riffbin.RIFFChunk{FormType: riffbin.MustParseFourCC("NEST")}},
 		}},
 		{"NestedRIFXChunk", &riffbin.RIFFChunk{
-			FormType: riffbin.MustFourCC("TEST"),
+			FormType: riffbin.MustParseFourCC("TEST"),
 			Payload: []riffbin.Chunk{&riffbin.RIFFChunk{
 				ByteOrder: riffbin.BigEndian,
-				FormType:  riffbin.MustFourCC("NEST"),
+				FormType:  riffbin.MustParseFourCC("NEST"),
 			}},
 		}},
 	}
@@ -118,33 +118,33 @@ func TestWriterValidatesTreeBeforeWriting(t *testing.T) {
 			t.Parallel()
 
 			var buf bytes.Buffer
-			n, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(tc.tree)
-			if !errors.Is(err, riffbin.ErrInvalidChunk) {
-				t.Errorf("CompletedChunkWriter: should be ErrInvalidChunk but got: %v", err)
+			n, err := riffbin.NewWriter(&buf).WriteChunk(tc.tree)
+			if !errors.Is(err, riffbin.ErrUnwritableChunk) {
+				t.Errorf("Writer: should be ErrUnwritableChunk but got: %v", err)
 			}
 			if n != 0 || buf.Len() != 0 {
-				t.Errorf("CompletedChunkWriter: wrote %d byte(s) before failing", buf.Len())
+				t.Errorf("Writer: wrote %d byte(s) before failing", buf.Len())
 			}
 
 			m := &memWriteSeeker{}
-			w, err := riffbin.NewIncompleteChunkWriter(m)
+			w, err := riffbin.NewStreamingWriter(m)
 			if err != nil {
 				t.Fatal(err)
 			}
 			n, err = w.WriteChunk(tc.tree)
-			if !errors.Is(err, riffbin.ErrInvalidChunk) {
-				t.Errorf("IncompleteChunkWriter: should be ErrInvalidChunk but got: %v", err)
+			if !errors.Is(err, riffbin.ErrUnwritableChunk) {
+				t.Errorf("StreamingWriter: should be ErrUnwritableChunk but got: %v", err)
 			}
 			if n != 0 || len(m.buf) != 0 {
-				t.Errorf("IncompleteChunkWriter: wrote %d byte(s) before failing", len(m.buf))
+				t.Errorf("StreamingWriter: wrote %d byte(s) before failing", len(m.buf))
 			}
 		})
 	}
 }
 
-// A single IncompleteChunkWriter must be able to write several chunks in a row:
+// A single StreamingWriter must be able to write several chunks in a row:
 // each backfill is relative to where its own chunk started.
-func TestIncompleteChunkWriterConsecutiveWrites(t *testing.T) {
+func TestStreamingWriterConsecutiveWrites(t *testing.T) {
 	t.Parallel()
 
 	expected := []byte{
@@ -174,10 +174,10 @@ func TestIncompleteChunkWriterConsecutiveWrites(t *testing.T) {
 		if df := cmp.Diff(expected, got); df != "" {
 			t.Errorf("unexpected bytes are written: %s", df)
 		}
-		if _, err := riffbin.ReadFull(bytes.NewReader(got[:24])); err != nil {
+		if _, err := riffbin.ReadAll(bytes.NewReader(got[:24])); err != nil {
 			t.Errorf("first chunk does not parse: %v", err)
 		}
-		if _, err := riffbin.ReadFull(bytes.NewReader(got[24:])); err != nil {
+		if _, err := riffbin.ReadAll(bytes.NewReader(got[24:])); err != nil {
 			t.Errorf("second chunk does not parse: %v", err)
 		}
 	}
@@ -185,15 +185,15 @@ func TestIncompleteChunkWriterConsecutiveWrites(t *testing.T) {
 	t.Run("Seek", func(t *testing.T) {
 		t.Parallel()
 		m := &memWriteSeeker{}
-		w, err := riffbin.NewIncompleteChunkWriter(m)
+		w, err := riffbin.NewStreamingWriter(m)
 		if err != nil {
 			t.Fatal(err)
 		}
-		n1, err := w.WriteChunk(buildIncompleteTree("abc"))
+		n1, err := w.WriteChunk(buildStreamingTree("abc"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		n2, err := w.WriteChunk(buildIncompleteTree("defgh"))
+		n2, err := w.WriteChunk(buildStreamingTree("defgh"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,15 +210,15 @@ func TestIncompleteChunkWriterConsecutiveWrites(t *testing.T) {
 		}
 		defer os.Remove(f.Name())
 
-		w, err := riffbin.NewIncompleteChunkWriter(f)
+		w, err := riffbin.NewStreamingWriter(f)
 		if err != nil {
 			t.Fatal(err)
 		}
-		n1, err := w.WriteChunk(buildIncompleteTree("abc"))
+		n1, err := w.WriteChunk(buildStreamingTree("abc"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		n2, err := w.WriteChunk(buildIncompleteTree("defgh"))
+		n2, err := w.WriteChunk(buildStreamingTree("defgh"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -235,16 +235,16 @@ func TestIncompleteChunkWriterConsecutiveWrites(t *testing.T) {
 }
 
 // A write failure on the first pass — before any backfill — must surface as an error.
-func TestIncompleteChunkWriterReportsFirstPassError(t *testing.T) {
+func TestStreamingWriterReportsFirstPassError(t *testing.T) {
 	t.Parallel()
 
 	m := &memWriteSeeker{}
 	m.failWrite = func(pos int64) error { return errors.New("injected write failure") }
-	w, err := riffbin.NewIncompleteChunkWriter(m)
+	w, err := riffbin.NewStreamingWriter(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = w.WriteChunk(buildIncompleteTree("abc")); err == nil {
+	if _, err = w.WriteChunk(buildStreamingTree("abc")); err == nil {
 		t.Fatal("the write failure should be reported")
 	}
 }
@@ -252,7 +252,7 @@ func TestIncompleteChunkWriterReportsFirstPassError(t *testing.T) {
 // A failure while backfilling the size fields must surface as an error: the file
 // holds placeholder sizes, so pretending the write succeeded would hand the caller
 // a corrupt file.
-func TestIncompleteChunkWriterReportsBackfillError(t *testing.T) {
+func TestStreamingWriterReportsBackfillError(t *testing.T) {
 	t.Parallel()
 
 	t.Run("Seek", func(t *testing.T) {
@@ -265,30 +265,30 @@ func TestIncompleteChunkWriterReportsBackfillError(t *testing.T) {
 			}
 			return nil
 		}
-		w, err := riffbin.NewIncompleteChunkWriter(m)
+		w, err := riffbin.NewStreamingWriter(m)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = w.WriteChunk(buildIncompleteTree("abc")); err == nil {
+		if _, err = w.WriteChunk(buildStreamingTree("abc")); err == nil {
 			t.Fatal("the backfill failure should be reported")
 		}
 	})
 	t.Run("WriterAt", func(t *testing.T) {
 		t.Parallel()
 		m := &failingWriterAt{}
-		w, err := riffbin.NewIncompleteChunkWriter(m)
+		w, err := riffbin.NewStreamingWriter(m)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = w.WriteChunk(buildIncompleteTree("abc")); err == nil {
+		if _, err = w.WriteChunk(buildStreamingTree("abc")); err == nil {
 			t.Fatal("the backfill failure should be reported")
 		}
 	})
 }
 
-// An incomplete sub-chunk whose stream turns out to be empty is a zero-sized
+// A streaming sub-chunk whose stream turns out to be empty is a zero-sized
 // sub-chunk: the backfilled size is 0 and no pad byte is emitted.
-func TestIncompleteChunkWriterEmptyBody(t *testing.T) {
+func TestStreamingWriterEmptyBody(t *testing.T) {
 	t.Parallel()
 
 	expected := []byte{
@@ -300,11 +300,11 @@ func TestIncompleteChunkWriterEmptyBody(t *testing.T) {
 	}
 
 	m := &memWriteSeeker{}
-	w, err := riffbin.NewIncompleteChunkWriter(m)
+	w, err := riffbin.NewStreamingWriter(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := w.WriteChunk(buildIncompleteTree(""))
+	n, err := w.WriteChunk(buildStreamingTree(""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,20 +314,20 @@ func TestIncompleteChunkWriterEmptyBody(t *testing.T) {
 	if df := cmp.Diff(expected, m.buf); df != "" {
 		t.Errorf("unexpected bytes are written: %s", df)
 	}
-	if _, err := riffbin.ReadFull(bytes.NewReader(m.buf)); err != nil {
+	if _, err := riffbin.ReadAll(bytes.NewReader(m.buf)); err != nil {
 		t.Errorf("the written chunk does not parse: %v", err)
 	}
 }
 
-// An incomplete sub-chunk whose stream was already consumed would write a header
+// A streaming sub-chunk whose stream was already consumed would write a header
 // counting bytes that can no longer be produced.
-func TestIncompleteChunkWriterRejectsConsumedChunk(t *testing.T) {
+func TestStreamingWriterRejectsConsumedChunk(t *testing.T) {
 	t.Parallel()
 
-	tree := buildIncompleteTree("abc")
+	tree := buildStreamingTree("abc")
 
 	m1 := &memWriteSeeker{}
-	w1, err := riffbin.NewIncompleteChunkWriter(m1)
+	w1, err := riffbin.NewStreamingWriter(m1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,13 +336,13 @@ func TestIncompleteChunkWriterRejectsConsumedChunk(t *testing.T) {
 	}
 
 	m2 := &memWriteSeeker{}
-	w2, err := riffbin.NewIncompleteChunkWriter(m2)
+	w2, err := riffbin.NewStreamingWriter(m2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	n, err := w2.WriteChunk(tree)
-	if !errors.Is(err, riffbin.ErrConsumedIncompleteChunk) {
-		t.Errorf("should be ErrConsumedIncompleteChunk but got: %v", err)
+	if !errors.Is(err, riffbin.ErrConsumedStreamingChunk) {
+		t.Errorf("should be ErrConsumedStreamingChunk but got: %v", err)
 	}
 	if n != 0 || len(m2.buf) != 0 {
 		t.Errorf("wrote %d byte(s) before failing", len(m2.buf))

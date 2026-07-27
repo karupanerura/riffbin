@@ -73,8 +73,8 @@ type GroupedChunk interface {
 	// GroupType is the four-character form type (RIFF) or list type (LIST).
 	GroupType() FourCC
 
-	// SubChunks are the chunks contained in this chunk.
-	SubChunks() []Chunk
+	// Children are the chunks contained in this chunk.
+	Children() []Chunk
 }
 
 // SubChunk is a leaf chunk carrying a byte payload.
@@ -83,15 +83,15 @@ type SubChunk interface {
 
 	// Body returns a reader over the chunk payload.
 	//
-	// A completed sub-chunk returns an independent reader on every call, so it can be
-	// written more than once. An incomplete sub-chunk returns the underlying stream,
-	// which can only be consumed once.
+	// A non-streaming sub-chunk returns an independent reader on every call, so
+	// it can be written more than once. A streaming sub-chunk returns the
+	// underlying stream, which can only be consumed once.
 	Body() io.Reader
 
-	// Incomplete reports whether the payload length is still unknown.
-	// An incomplete sub-chunk learns its BodySize only by having its payload
-	// read through; a completed sub-chunk knows it up front.
-	Incomplete() bool
+	// Streaming reports whether the payload length is still unknown.
+	// A streaming sub-chunk learns its BodySize only by having its payload
+	// read through; the other sub-chunks know it up front.
+	Streaming() bool
 }
 
 // groupBodySize is the body size of a grouped chunk: the group type plus every
@@ -129,7 +129,7 @@ func (c *RIFFChunk) BodySize() int64 { return groupBodySize(c.Payload) }
 
 func (c *RIFFChunk) GroupType() FourCC { return c.FormType }
 
-func (c *RIFFChunk) SubChunks() []Chunk { return c.Payload }
+func (c *RIFFChunk) Children() []Chunk { return c.Payload }
 
 // ListChunk is a LIST chunk: an ordered sequence of sub-chunks under a
 // four-character list type. LIST is the only chunk besides RIFF that the
@@ -147,86 +147,86 @@ func (c *ListChunk) BodySize() int64 { return groupBodySize(c.Payload) }
 
 func (c *ListChunk) GroupType() FourCC { return c.ListType }
 
-func (c *ListChunk) SubChunks() []Chunk { return c.Payload }
+func (c *ListChunk) Children() []Chunk { return c.Payload }
 
-// OnMemorySubChunk is a sub-chunk holding its payload in memory.
-type OnMemorySubChunk struct {
+// InMemorySubChunk is a sub-chunk holding its payload in memory.
+type InMemorySubChunk struct {
 	ID      FourCC
 	Payload []byte
 }
 
-var _ SubChunk = (*OnMemorySubChunk)(nil)
+var _ SubChunk = (*InMemorySubChunk)(nil)
 
-func (c *OnMemorySubChunk) ChunkID() FourCC { return c.ID }
+func (c *InMemorySubChunk) ChunkID() FourCC { return c.ID }
 
-func (c *OnMemorySubChunk) BodySize() int64 { return int64(len(c.Payload)) }
+func (c *InMemorySubChunk) BodySize() int64 { return int64(len(c.Payload)) }
 
-func (c *OnMemorySubChunk) Incomplete() bool { return false }
+func (c *InMemorySubChunk) Streaming() bool { return false }
 
-func (c *OnMemorySubChunk) Body() io.Reader { return bytes.NewReader(c.Payload) }
+func (c *InMemorySubChunk) Body() io.Reader { return bytes.NewReader(c.Payload) }
 
-// IncompleteSubChunk is a sub-chunk whose payload comes from an io.Reader of
-// unknown length. Only IncompleteChunkWriter can write it: the size field is
+// StreamingSubChunk is a sub-chunk whose payload comes from an io.Reader of
+// unknown length. Only StreamingWriter can write it: the size field is
 // not known until the reader has been drained.
-type IncompleteSubChunk struct {
+type StreamingSubChunk struct {
 	id   FourCC
-	body incompleteChunkBody
+	body streamingChunkBody
 }
 
-var _ SubChunk = (*IncompleteSubChunk)(nil)
+var _ SubChunk = (*StreamingSubChunk)(nil)
 
-// NewIncompleteSubChunk returns a sub-chunk that streams its payload from r.
-// The length of r does not have to be known in advance: IncompleteChunkWriter
+// NewStreamingSubChunk returns a sub-chunk that streams its payload from r.
+// The length of r does not have to be known in advance: StreamingWriter
 // writes the payload through and fixes the size fields afterwards.
-func NewIncompleteSubChunk(id FourCC, r io.Reader) *IncompleteSubChunk {
-	return &IncompleteSubChunk{id: id, body: incompleteChunkBody{reader: r}}
+func NewStreamingSubChunk(id FourCC, r io.Reader) *StreamingSubChunk {
+	return &StreamingSubChunk{id: id, body: streamingChunkBody{reader: r}}
 }
 
-func (c *IncompleteSubChunk) ChunkID() FourCC { return c.id }
+func (c *StreamingSubChunk) ChunkID() FourCC { return c.id }
 
-func (c *IncompleteSubChunk) BodySize() int64 { return c.body.readLength }
+func (c *StreamingSubChunk) BodySize() int64 { return c.body.readLength }
 
-func (c *IncompleteSubChunk) Incomplete() bool { return true }
+func (c *StreamingSubChunk) Streaming() bool { return true }
 
 // Body returns the underlying stream. It can only be consumed once, and the chunk
 // only knows its BodySize after it has been consumed.
-func (c *IncompleteSubChunk) Body() io.Reader { return &c.body }
+func (c *StreamingSubChunk) Body() io.Reader { return &c.body }
 
-type incompleteChunkBody struct {
+type streamingChunkBody struct {
 	readLength int64
 	reader     io.Reader
 }
 
-func (c *incompleteChunkBody) Read(p []byte) (n int, err error) {
+func (c *streamingChunkBody) Read(p []byte) (n int, err error) {
 	n, err = c.reader.Read(p)
 	c.readLength += int64(n)
 	return
 }
 
-func (c *incompleteChunkBody) WriteTo(w io.Writer) (n int64, err error) {
+func (c *streamingChunkBody) WriteTo(w io.Writer) (n int64, err error) {
 	n, err = io.Copy(w, c.reader)
 	c.readLength += n
 	return
 }
 
-// InStreamSubChunk is a sub-chunk whose payload is a section of a seekable stream,
+// SectionSubChunk is a sub-chunk whose payload is a section of a seekable stream,
 // read on demand. ReadSections creates these; a hand-made value needs a non-nil
 // embedded *io.SectionReader, or BodySize and Body panic.
-type InStreamSubChunk struct {
+type SectionSubChunk struct {
 	ID FourCC
 	*io.SectionReader
 }
 
-var _ SubChunk = (*InStreamSubChunk)(nil)
+var _ SubChunk = (*SectionSubChunk)(nil)
 
-func (c *InStreamSubChunk) ChunkID() FourCC { return c.ID }
+func (c *SectionSubChunk) ChunkID() FourCC { return c.ID }
 
-func (c *InStreamSubChunk) BodySize() int64 { return c.SectionReader.Size() }
+func (c *SectionSubChunk) BodySize() int64 { return c.SectionReader.Size() }
 
-func (c *InStreamSubChunk) Incomplete() bool { return false }
+func (c *SectionSubChunk) Streaming() bool { return false }
 
 // Body returns an independent reader over the section, leaving the embedded
 // *io.SectionReader untouched so the chunk can be written repeatedly.
-func (c *InStreamSubChunk) Body() io.Reader {
+func (c *SectionSubChunk) Body() io.Reader {
 	return io.NewSectionReader(c.SectionReader, 0, c.SectionReader.Size())
 }

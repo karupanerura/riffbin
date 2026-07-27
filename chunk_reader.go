@@ -13,19 +13,19 @@ import (
 // Real RIFF trees are shallow; the limit keeps hostile input from exhausting the stack.
 const maxGroupDepth = 100
 
-// PartialReader is the input required by ReadSections: Seek skips over the
+// ReadSeekerAt is the input required by ReadSections: Seek skips over the
 // sub-chunk bodies while parsing, and ReadAt serves them on demand afterwards.
-type PartialReader interface {
+type ReadSeekerAt interface {
 	io.ReadSeeker
 	io.ReaderAt
 }
 
 type readerConfig struct {
-	allowUnpaddedChunks bool
-	allowTrailingData   bool
+	allowPaddingViolations bool
+	allowTrailingData      bool
 }
 
-// ReaderOption relaxes a rule of the RIFF specification for ReadFull and ReadSections.
+// ReaderOption relaxes a rule of the RIFF specification for ReadAll and ReadSections.
 // Without any option both readers are strict.
 type ReaderOption interface {
 	apply(*readerConfig)
@@ -35,14 +35,14 @@ type readerOptionFunc func(*readerConfig)
 
 func (f readerOptionFunc) apply(c *readerConfig) { f(c) }
 
-// AllowUnpaddedChunks accepts files whose odd-sized chunk bodies are not followed by a
+// AllowPaddingViolations accepts files whose odd-sized chunk bodies are not followed by a
 // well-formed pad byte. The byte where the pad byte belongs is then read by its value:
 // 0x00 is the pad byte; printable ASCII is taken as the first byte of the next chunk
 // header, for files that omit pad bytes entirely (riffbin up to v0.0.6 wrote such files);
 // any other value is a pad byte holding garbage and is skipped, as most RIFF
 // implementations never inspect the pad value.
-func AllowUnpaddedChunks() ReaderOption {
-	return readerOptionFunc(func(c *readerConfig) { c.allowUnpaddedChunks = true })
+func AllowPaddingViolations() ReaderOption {
+	return readerOptionFunc(func(c *readerConfig) { c.allowPaddingViolations = true })
 }
 
 // AllowTrailingData ignores any bytes that follow the RIFF chunk instead of rejecting
@@ -54,28 +54,28 @@ func AllowTrailingData() ReaderOption {
 	return readerOptionFunc(func(c *readerConfig) { c.allowTrailingData = true })
 }
 
-// ReadFull reads one RIFF chunk from r, materializing every sub-chunk body in
-// memory as an *OnMemorySubChunk.
+// ReadAll reads one RIFF chunk from r, materializing every sub-chunk body in
+// memory as an *InMemorySubChunk.
 //
 // An input that ends before the first byte of the root chunk header yields
 // io.EOF. With AllowTrailingData the call consumes exactly the root chunk, so a
 // stream of concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the
 // 32-bit size field by appending RIFF("AVIX") chunks — is read by calling
-// ReadFull repeatedly until io.EOF.
-func ReadFull(r io.Reader, opts ...ReaderOption) (*RIFFChunk, error) {
+// ReadAll repeatedly until io.EOF.
+func ReadAll(r io.Reader, opts ...ReaderOption) (*RIFFChunk, error) {
 	return read(r, nil, -1, opts)
 }
 
 // ReadSections reads one RIFF chunk from r, skipping over the sub-chunk bodies
-// and returning *InStreamSubChunk values that read them from r on demand; use
+// and returning *SectionSubChunk values that read them from r on demand; use
 // it for files too large to hold in memory. All boundaries are relative to the
 // position r is at when the call is made, so a RIFF chunk embedded mid-stream
 // can be read in place.
 //
-// Like ReadFull, it yields io.EOF when the input ends before the root chunk
+// Like ReadAll, it yields io.EOF when the input ends before the root chunk
 // header, and with AllowTrailingData it leaves r right after the root chunk,
 // so repeated calls read a stream of concatenated RIFF chunks.
-func ReadSections(r PartialReader, opts ...ReaderOption) (*RIFFChunk, error) {
+func ReadSections(r ReadSeekerAt, opts ...ReaderOption) (*RIFFChunk, error) {
 	// the sub-chunk bodies are skipped by seeking rather than read, so the size of the
 	// input has to be known up front to notice that it is shorter than its headers claim.
 	origin, err := r.Seek(0, io.SeekCurrent)
@@ -109,7 +109,7 @@ func (o *offsetReader) Read(p []byte) (int, error) {
 
 type parser struct {
 	src  *offsetReader
-	pr   PartialReader // non-nil for ReadSections
+	pr   ReadSeekerAt // non-nil for ReadSections
 	conf readerConfig
 
 	// limit is the byte length of the input, or -1 when it is unknown.
@@ -119,7 +119,7 @@ type parser struct {
 	path  []string
 
 	// pending holds the byte probed where a pad byte was expected but a chunk header
-	// was found instead. It is only ever set with AllowUnpaddedChunks.
+	// was found instead. It is only ever set with AllowPaddingViolations.
 	pending     bool
 	pendingByte byte
 
@@ -129,7 +129,7 @@ type parser struct {
 	tolerateTrailingPad bool
 }
 
-func read(r io.Reader, pr PartialReader, limit int64, opts []ReaderOption) (*RIFFChunk, error) {
+func read(r io.Reader, pr ReadSeekerAt, limit int64, opts []ReaderOption) (*RIFFChunk, error) {
 	p := &parser{src: &offsetReader{r: r}, pr: pr, limit: limit}
 	for _, o := range opts {
 		o.apply(&p.conf)
@@ -317,7 +317,7 @@ func (p *parser) skipPadding(id FourCC, bodyLen, end int64) error {
 	if buf[0] == 0x00 {
 		return nil
 	}
-	if p.conf.allowUnpaddedChunks {
+	if p.conf.allowPaddingViolations {
 		// chunk IDs are printable ASCII, so a printable byte here can head the next
 		// header of an unpadded file, while anything else can only be a pad byte
 		// holding garbage
@@ -331,13 +331,13 @@ func (p *parser) skipPadding(id FourCC, bodyLen, end int64) error {
 
 func (p *parser) readSubChunk(id FourCC, bodyLen int64) (SubChunk, error) {
 	if p.pr != nil {
-		return p.createInStreamSubChunk(id, bodyLen)
+		return p.createSectionSubChunk(id, bodyLen)
 	}
-	return p.createOnMemorySubChunk(id, bodyLen)
+	return p.createInMemorySubChunk(id, bodyLen)
 }
 
-func (p *parser) createOnMemorySubChunk(id FourCC, bodyLen int64) (SubChunk, error) {
-	chunk := &OnMemorySubChunk{ID: id, Payload: []byte{}}
+func (p *parser) createInMemorySubChunk(id FourCC, bodyLen int64) (SubChunk, error) {
+	chunk := &InMemorySubChunk{ID: id, Payload: []byte{}}
 	if bodyLen == 0 {
 		return chunk, nil
 	}
@@ -359,7 +359,7 @@ func (p *parser) createOnMemorySubChunk(id FourCC, bodyLen int64) (SubChunk, err
 	return chunk, nil
 }
 
-func (p *parser) createInStreamSubChunk(id FourCC, bodyLen int64) (SubChunk, error) {
+func (p *parser) createSectionSubChunk(id FourCC, bodyLen int64) (SubChunk, error) {
 	// get seek position
 	pos, err := p.pr.Seek(0, io.SeekCurrent)
 	if err != nil {
@@ -372,7 +372,7 @@ func (p *parser) createInStreamSubChunk(id FourCC, bodyLen int64) (SubChunk, err
 	}
 	p.src.off += bodyLen
 
-	return &InStreamSubChunk{ID: id, SectionReader: io.NewSectionReader(p.pr, pos, bodyLen)}, nil
+	return &SectionSubChunk{ID: id, SectionReader: io.NewSectionReader(p.pr, pos, bodyLen)}, nil
 }
 
 func (p *parser) readFull(buf []byte, what string) error {

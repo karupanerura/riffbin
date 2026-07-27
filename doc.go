@@ -10,7 +10,7 @@
 // carrying bytes and implements [SubChunk].
 //
 // Chunk IDs and group types are [FourCC] values, padded on the right with spaces,
-// e.g. [MustFourCC]("fmt "). The specification defines them as ASCII alphanumeric;
+// e.g. [MustParseFourCC]("fmt "). The specification defines them as ASCII alphanumeric;
 // riffbin accepts any printable ASCII, matching real-world files.
 //
 // # Word alignment
@@ -24,16 +24,16 @@
 // room for one. Two deviations common in real files are still read without an
 // option: a final chunk whose parent size stops right at the odd body, and a
 // single 0x00 after the root chunk left by writers that append the last pad
-// byte without counting it. [AllowUnpaddedChunks] additionally reads files
+// byte without counting it. [AllowPaddingViolations] additionally reads files
 // that omit pad bytes entirely (riffbin up to v0.0.6 wrote such files, and
 // e.g. Apple CoreAudio still writes them) or whose pad bytes hold garbage
 // instead of zero.
 //
 // # Reading
 //
-// [ReadFull] accepts any io.Reader and materializes every sub-chunk body in
-// memory as an [OnMemorySubChunk]. [ReadSections] needs a [PartialReader] and
-// skips the bodies, returning an [InStreamSubChunk] that reads from the original
+// [ReadAll] accepts any io.Reader and materializes every sub-chunk body in
+// memory as an [InMemorySubChunk]. [ReadSections] needs a [ReadSeekerAt] and
+// skips the bodies, returning a [SectionSubChunk] that reads from the original
 // stream on demand; use it for files too large to hold in memory. An input that
 // ends before the first byte of the root chunk header yields io.EOF.
 //
@@ -41,32 +41,32 @@
 // which carries the byte offset and the chunk path and wraps [ErrInvalidFormat];
 // an I/O failure of the underlying reader is returned as is:
 //
-//	chunk, err := riffbin.ReadFull(r)
+//	chunk, err := riffbin.ReadAll(r)
 //	if errors.Is(err, riffbin.ErrInvalidFormat) {
 //		// ...
 //	}
 //
-// [AllowUnpaddedChunks] and [AllowTrailingData] relax individual rules for files
+// [AllowPaddingViolations] and [AllowTrailingData] relax individual rules for files
 // that do not follow the specification. With [AllowTrailingData] a call consumes
 // exactly one root chunk and leaves the input right after it, so a stream of
 // concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the 32-bit
-// size field by appending RIFF("AVIX") chunks — is read by calling [ReadFull]
+// size field by appending RIFF("AVIX") chunks — is read by calling [ReadAll]
 // or [ReadSections] repeatedly until io.EOF.
 //
 // # Writing
 //
-// [CompletedChunkWriter] writes a tree whose sizes are all known up front.
-// [IncompleteChunkWriter] additionally accepts an [IncompleteSubChunk], whose body
+// [Writer] writes a tree whose sizes are all known up front.
+// [StreamingWriter] additionally accepts a [StreamingSubChunk], whose body
 // comes from an io.Reader of unknown length; it writes placeholder sizes and
 // seeks back to fix them once the stream has been consumed, so it needs an
 // io.WriteSeeker.
 //
-// A completed sub-chunk can be written repeatedly: [SubChunk.Body] hands out an
+// A non-streaming sub-chunk can be written repeatedly: [SubChunk.Body] hands out an
 // independent reader on every call. Before the first byte is written, the tree is
 // checked against what the readers accept: a non-ASCII FourCC, a sub-chunk using a
-// structural ID such as "LIST", or a nested RIFF chunk fails with [ErrInvalidChunk],
-// and an incomplete sub-chunk whose stream was already consumed fails with
-// [ErrConsumedIncompleteChunk]. A write that would produce a file inconsistent
+// structural ID such as "LIST", or a nested RIFF chunk fails with [ErrUnwritableChunk],
+// and a streaming sub-chunk whose stream was already consumed fails with
+// [ErrConsumedStreamingChunk]. A write that would produce a file inconsistent
 // with the declared sizes fails with [ErrSizeMismatch] or [ErrChunkTooLarge] rather
 // than emitting corrupt bytes.
 //

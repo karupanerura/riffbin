@@ -27,14 +27,14 @@ allows to contain other chunks. Everything else is a leaf implementing `SubChunk
 
 | type | payload |
 | --- | --- |
-| `*OnMemorySubChunk` | a `[]byte` you own |
-| `*InStreamSubChunk` | a section of a seekable stream, read on demand |
-| `*IncompleteSubChunk` | an `io.Reader` whose length is not known in advance |
+| `*InMemorySubChunk` | a `[]byte` you own |
+| `*SectionSubChunk` | a section of a seekable stream, read on demand |
+| `*StreamingSubChunk` | an `io.Reader` whose length is not known in advance |
 
 Chunk IDs and group types are `FourCC` values, padded on the right with spaces. The
 specification defines them as ASCII alphanumeric; riffbin accepts any printable ASCII,
 matching the identifiers found in real-world files. Use a literal
-(`[4]byte{'f', 'm', 't', ' '}`) or `riffbin.MustFourCC("fmt")`.
+(`[4]byte{'f', 'm', 't', ' '}`) or `riffbin.MustParseFourCC("fmt")`.
 
 ## Word alignment
 
@@ -46,7 +46,7 @@ emit it.
 The readers require the pad byte whenever the enclosing size says there is room for
 one. Two deviations common in real files are still read without an option: a final
 chunk whose pad byte was left uncounted, and the single trailing `0x00` such a file
-ends with. `AllowUnpaddedChunks` additionally reads files that omit pad bytes
+ends with. `AllowPaddingViolations` additionally reads files that omit pad bytes
 entirely or whose pad bytes hold garbage instead of zero (see Example 4).
 
 # Examples
@@ -54,11 +54,11 @@ entirely or whose pad bytes hold garbage instead of zero (see Example 4).
 ## Example 1: write a WAVE file
 
 ```go
-_, err := riffbin.NewCompletedChunkWriter(w).WriteChunk(&riffbin.RIFFChunk{
-	FormType: riffbin.MustFourCC("WAVE"),
+_, err := riffbin.NewWriter(w).WriteChunk(&riffbin.RIFFChunk{
+	FormType: riffbin.MustParseFourCC("WAVE"),
 	Payload: []riffbin.Chunk{
-		&riffbin.OnMemorySubChunk{
-			ID: riffbin.MustFourCC("fmt"),
+		&riffbin.InMemorySubChunk{
+			ID: riffbin.MustParseFourCC("fmt"),
 			Payload: []byte{
 				0x01, 0x00, // Compression Code (Linear PCM)
 				0x01, 0x00, // Number of channels (Monoral)
@@ -68,8 +68,8 @@ _, err := riffbin.NewCompletedChunkWriter(w).WriteChunk(&riffbin.RIFFChunk{
 				0x08, 0x00, // Significant bits per sample (8bit)
 			},
 		},
-		&riffbin.OnMemorySubChunk{
-			ID:      riffbin.MustFourCC("data"),
+		&riffbin.InMemorySubChunk{
+			ID:      riffbin.MustParseFourCC("data"),
 			Payload: pcm, // []byte
 		},
 	},
@@ -78,32 +78,32 @@ _, err := riffbin.NewCompletedChunkWriter(w).WriteChunk(&riffbin.RIFFChunk{
 
 ## Example 2: write a WAVE file from an io.Reader
 
-The body size of an `IncompleteSubChunk` is only known once its reader is drained, so
-`IncompleteChunkWriter` writes placeholder sizes and seeks back to fix every affected
+The body size of an `StreamingSubChunk` is only known once its reader is drained, so
+`StreamingWriter` writes placeholder sizes and seeks back to fix every affected
 chunk header. It therefore needs an `io.WriteSeeker`.
 
 ```go
-w, err := riffbin.NewIncompleteChunkWriter(f)
+w, err := riffbin.NewStreamingWriter(f)
 if err != nil {
 	panic(err)
 }
 
 _, err = w.WriteChunk(&riffbin.RIFFChunk{
-	FormType: riffbin.MustFourCC("WAVE"),
+	FormType: riffbin.MustParseFourCC("WAVE"),
 	Payload: []riffbin.Chunk{
-		&riffbin.OnMemorySubChunk{
-			ID:      riffbin.MustFourCC("fmt"),
+		&riffbin.InMemorySubChunk{
+			ID:      riffbin.MustParseFourCC("fmt"),
 			Payload: fmtChunkPayload,
 		},
-		riffbin.NewIncompleteSubChunk(riffbin.MustFourCC("data"), r),
+		riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("data"), r),
 	},
 })
 ```
 
 ## Example 3: read a RIFF file
 
-`ReadFull` takes any `io.Reader` and holds every body in memory. `ReadSections` takes
-a `PartialReader` (`io.ReadSeeker` + `io.ReaderAt`) and only records where each body
+`ReadAll` takes any `io.Reader` and holds every body in memory. `ReadSections` takes
+a `ReadSeekerAt` (`io.ReadSeeker` + `io.ReaderAt`) and only records where each body
 lives, so it can open files far larger than memory.
 
 ```go
@@ -123,7 +123,7 @@ if err != nil {
 }
 
 for _, chunk := range riffChunk.Payload {
-	if sub, ok := chunk.(riffbin.SubChunk); ok && sub.ChunkID() == riffbin.MustFourCC("data") {
+	if sub, ok := chunk.(riffbin.SubChunk); ok && sub.ChunkID() == riffbin.MustParseFourCC("data") {
 		io.Copy(os.Stdout, sub.Body())
 	}
 }
@@ -138,10 +138,10 @@ underlying reader is returned as is, never classified as a format error.
 ```go
 // accept a missing pad byte after an odd-sized chunk (riffbin <= v0.0.6 wrote such
 // files, and e.g. Apple CoreAudio still writes them), or a pad byte holding garbage
-riffChunk, err := riffbin.ReadFull(r, riffbin.AllowUnpaddedChunks())
+riffChunk, err := riffbin.ReadAll(r, riffbin.AllowPaddingViolations())
 
 // ignore whatever follows the RIFF chunk
-riffChunk, err = riffbin.ReadFull(r, riffbin.AllowTrailingData())
+riffChunk, err = riffbin.ReadAll(r, riffbin.AllowTrailingData())
 ```
 
 ## Example 5: read concatenated RIFF chunks
@@ -153,7 +153,7 @@ that ends before the first byte of a root chunk header yields `io.EOF`.
 
 ```go
 for {
-	riffChunk, err := riffbin.ReadFull(r, riffbin.AllowTrailingData())
+	riffChunk, err := riffbin.ReadAll(r, riffbin.AllowTrailingData())
 	if errors.Is(err, io.EOF) {
 		break // end of the stream
 	}
@@ -170,9 +170,9 @@ Only the size fields change; four-character codes keep their order. The variant 
 detected when reading and recorded on the chunk, so a file round-trips byte for byte.
 
 ```go
-_, err := riffbin.NewCompletedChunkWriter(w).WriteChunk(&riffbin.RIFFChunk{
+_, err := riffbin.NewWriter(w).WriteChunk(&riffbin.RIFFChunk{
 	ByteOrder: riffbin.BigEndian,
-	FormType:  riffbin.MustFourCC("TEST"),
+	FormType:  riffbin.MustParseFourCC("TEST"),
 	Payload:   payload,
 })
 ```
@@ -187,22 +187,30 @@ _, err := riffbin.NewCompletedChunkWriter(w).WriteChunk(&riffbin.RIFFChunk{
 # Migrating from v0.1.0
 
 v0.2.0 fixes a parser that could not read a `LIST` containing sub-chunks via
-`ReadSections`, and reworks the API around the RIFF specification. The changes are
-mechanical:
+`ReadSections`, and reworks the API around the RIFF specification and the Go naming
+conventions. The changes are mechanical:
 
 | v0.1.0 | v0.2.0 |
 | --- | --- |
+| `ReadFull` | `ReadAll` — it reads everything into memory, like `io.ReadAll`; `io.ReadFull` means something else |
+| `PartialReader` | `ReadSeekerAt`, named for its abilities like `io.ReadWriteSeeker` |
+| `CompletedChunkWriter`, `NewCompletedChunkWriter` | `Writer`, `NewWriter` |
+| `IncompleteChunkWriter`, `NewIncompleteChunkWriter` | `StreamingWriter`, `NewStreamingWriter` |
+| `OnMemorySubChunk` | `InMemorySubChunk` |
+| `InStreamSubChunk` | `SectionSubChunk`, matching `ReadSections` and `io.SectionReader` |
+| `IncompleteSubChunk`, `NewIncompleteSubChunk` | `StreamingSubChunk`, `NewStreamingSubChunk` — the size is unknown, not the data broken |
+| `SubChunk.Incomplete()` | `SubChunk.Streaming()` |
 | `Chunk.ChunkID() []byte` | `Chunk.ChunkID() FourCC` — compare with `==`, print with `%s` |
 | `Chunk.BodySize() uint32` | `Chunk.BodySize() int64` — sizes above 4 GiB now fail instead of wrapping |
 | `SubChunk` embeds `io.Reader` | `SubChunk.Body() io.Reader` — a fresh reader on every call |
 | `ChunkWriter.Write(*RIFFChunk)` | `ChunkWriter.WriteChunk(*RIFFChunk)` |
-| unexported grouped-chunk interface | exported `GroupedChunk` |
+| unexported grouped-chunk interface | exported `GroupedChunk`; its contained chunks are `Children()`, since the specification calls every nested chunk — a `LIST` included — a subchunk |
 | `err == riffbin.ErrInvalidFormat` | `errors.Is(err, riffbin.ErrInvalidFormat)` |
 | an empty input was `ErrInvalidFormat` | it is `io.EOF`, the clean end of a chunk stream |
-| unpadded files read silently | pass `riffbin.AllowUnpaddedChunks()` |
+| unpadded files read silently | pass `riffbin.AllowPaddingViolations()` |
 
 Input that used to be accepted silently — a nested `RIFF` chunk, a non-ASCII chunk ID, a
 truncated body — is now rejected. The writers validate the tree before emitting anything:
-a tree the readers would not accept fails with `ErrInvalidChunk`, one above 4 GiB with
-`ErrChunkTooLarge`, and an already-consumed `IncompleteSubChunk` with
-`ErrConsumedIncompleteChunk`.
+a tree the readers would not accept fails with `ErrUnwritableChunk`, one above 4 GiB with
+`ErrChunkTooLarge`, and an already-consumed `StreamingSubChunk` with
+`ErrConsumedStreamingChunk`.

@@ -35,7 +35,7 @@ func main() {
 
 	var opts []riffbin.ReaderOption
 	if *lenient {
-		opts = append(opts, riffbin.AllowUnpaddedChunks(), riffbin.AllowTrailingData())
+		opts = append(opts, riffbin.AllowPaddingViolations(), riffbin.AllowTrailingData())
 	}
 	riffChunk, err := riffbin.ReadSections(f, opts...)
 	if err != nil {
@@ -55,7 +55,7 @@ func dumpChunk(chunk riffbin.Chunk, level int) {
 	switch c := chunk.(type) {
 	case riffbin.GroupedChunk:
 		fmt.Printf("%s[%s:%d]:\n", c.ChunkID(), c.GroupType(), c.BodySize())
-		for _, cc := range c.SubChunks() {
+		for _, cc := range c.Children() {
 			dumpChunk(cc, level+1)
 		}
 		return

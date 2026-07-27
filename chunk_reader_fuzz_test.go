@@ -72,12 +72,12 @@ func checkRoundTrip(t *testing.T, in []byte, chunk *riffbin.RIFFChunk) {
 	t.Helper()
 
 	var buf bytes.Buffer
-	if _, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(chunk); err != nil {
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(chunk); err != nil {
 		t.Log(hex.Dump(in))
 		t.Fatalf("write back: %v", err)
 	}
 
-	again, err := riffbin.ReadFull(bytes.NewReader(buf.Bytes()))
+	again, err := riffbin.ReadAll(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Log(hex.Dump(in))
 		t.Log(hex.Dump(buf.Bytes()))
@@ -90,12 +90,12 @@ func checkRoundTrip(t *testing.T, in []byte, chunk *riffbin.RIFFChunk) {
 	}
 }
 
-func FuzzReadFull(f *testing.F) {
+func FuzzReadAll(f *testing.F) {
 	for _, seed := range fuzzSeeds {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		c, err := riffbin.ReadFull(bytes.NewReader(b))
+		c, err := riffbin.ReadAll(bytes.NewReader(b))
 		if (c == nil) == (err == nil) {
 			t.Log(hex.Dump(b))
 			t.Fatal("invalid result")
@@ -122,12 +122,12 @@ func FuzzReadSections(f *testing.F) {
 	})
 }
 
-func FuzzReadFullLenient(f *testing.F) {
+func FuzzReadAllLenient(f *testing.F) {
 	for _, seed := range fuzzSeeds {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		c, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowUnpaddedChunks(), riffbin.AllowTrailingData())
+		c, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowPaddingViolations(), riffbin.AllowTrailingData())
 		if (c == nil) == (err == nil) {
 			t.Log(hex.Dump(b))
 			t.Fatal("invalid result")
@@ -140,7 +140,7 @@ func FuzzReadFullLenient(f *testing.F) {
 	})
 }
 
-// Whatever the input, ReadFull and ReadSections must agree: both accept or both
+// Whatever the input, ReadAll and ReadSections must agree: both accept or both
 // reject, and on success they yield the same tree. This pins the two readers to a
 // single definition of the format, in the strict and the lenient mode alike.
 func FuzzReadersAgree(f *testing.F) {
@@ -153,13 +153,13 @@ func FuzzReadersAgree(f *testing.F) {
 			opts []riffbin.ReaderOption
 		}{
 			{name: "strict"},
-			{name: "lenient", opts: []riffbin.ReaderOption{riffbin.AllowUnpaddedChunks(), riffbin.AllowTrailingData()}},
+			{name: "lenient", opts: []riffbin.ReaderOption{riffbin.AllowPaddingViolations(), riffbin.AllowTrailingData()}},
 		} {
-			full, fullErr := riffbin.ReadFull(bytes.NewReader(b), mode.opts...)
+			full, fullErr := riffbin.ReadAll(bytes.NewReader(b), mode.opts...)
 			sections, sectionsErr := riffbin.ReadSections(bytes.NewReader(b), mode.opts...)
 			if (fullErr == nil) != (sectionsErr == nil) {
 				t.Log(hex.Dump(b))
-				t.Fatalf("%s: the readers disagree: ReadFull=%v ReadSections=%v", mode.name, fullErr, sectionsErr)
+				t.Fatalf("%s: the readers disagree: ReadAll=%v ReadSections=%v", mode.name, fullErr, sectionsErr)
 			}
 			if fullErr == nil {
 				if df := cmp.Diff(flattenTree(t, full), flattenTree(t, sections)); df != "" {

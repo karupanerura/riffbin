@@ -14,54 +14,54 @@ type ChunkWriter interface {
 	WriteChunk(*RIFFChunk) (int64, error)
 }
 
-// CompletedChunkWriter writes chunk trees whose sizes are all known up front,
-// in a single forward pass. A tree holding an IncompleteSubChunk is rejected
-// with ErrUnexpectedIncompleteChunk; use IncompleteChunkWriter for those.
-type CompletedChunkWriter struct {
+// Writer writes chunk trees whose sizes are all known up front,
+// in a single forward pass. A tree holding a StreamingSubChunk is rejected
+// with ErrUnexpectedStreamingChunk; use StreamingWriter for those.
+type Writer struct {
 	w io.Writer
 }
 
-var _ ChunkWriter = (*CompletedChunkWriter)(nil)
+var _ ChunkWriter = (*Writer)(nil)
 
-// NewCompletedChunkWriter returns a writer that writes chunk trees to w.
-func NewCompletedChunkWriter(w io.Writer) *CompletedChunkWriter {
-	return &CompletedChunkWriter{w: w}
+// NewWriter returns a writer that writes chunk trees to w.
+func NewWriter(w io.Writer) *Writer {
+	return &Writer{w: w}
 }
 
 // WriteChunk writes the RIFF chunk tree to the underlying data stream.
 // It returns the number of bytes written and any error encountered that caused the write to stop early.
-func (w *CompletedChunkWriter) WriteChunk(c *RIFFChunk) (int64, error) {
+func (w *Writer) WriteChunk(c *RIFFChunk) (int64, error) {
 	if err := validateChunk(c, true, false); err != nil {
 		return 0, err
 	}
 	return writeChunk(w.w, c, c.ByteOrder.binary(), false)
 }
 
-// IncompleteChunkWriter writes chunk trees that may hold IncompleteSubChunk
+// StreamingWriter writes chunk trees that may hold StreamingSubChunk
 // values, whose sizes are unknown until their body streams are drained. It
 // writes the tree with placeholder sizes first, then seeks back and re-writes
 // the size fields — which is why it needs an io.WriteSeeker. It uses io.WriterAt
 // instead for the fix-up when w provides it.
-type IncompleteChunkWriter struct {
+type StreamingWriter struct {
 	w io.WriteSeeker
 }
 
-var _ ChunkWriter = (*IncompleteChunkWriter)(nil)
+var _ ChunkWriter = (*StreamingWriter)(nil)
 
-// NewIncompleteChunkWriter returns a writer that writes chunk trees to w.
+// NewStreamingWriter returns a writer that writes chunk trees to w.
 // A w that cannot actually seek is rejected here, before anything is written.
-func NewIncompleteChunkWriter(w io.WriteSeeker) (*IncompleteChunkWriter, error) {
+func NewStreamingWriter(w io.WriteSeeker) (*StreamingWriter, error) {
 	if _, err := w.Seek(0, io.SeekCurrent); err != nil {
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 
-	return &IncompleteChunkWriter{w: w}, nil
+	return &StreamingWriter{w: w}, nil
 }
 
 // WriteChunk writes the RIFF chunk tree to the underlying data stream, then seeks back
-// and re-writes every chunk size field once the incomplete bodies have been consumed.
+// and re-writes every chunk size field once the streaming bodies have been consumed.
 // It returns the number of bytes written and any error encountered that caused the write to stop early.
-func (w *IncompleteChunkWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
+func (w *StreamingWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
 	if err = validateChunk(c, true, true); err != nil {
 		return 0, err
 	}
@@ -144,7 +144,7 @@ func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
 	switch cc := c.(type) {
 	case GroupedChunk:
 		*pos += TypeBytes
-		for _, p := range cc.SubChunks() {
+		for _, p := range cc.Children() {
 			err := writeComplete(p, pos, f)
 			if err != nil {
 				return err
@@ -162,10 +162,10 @@ func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
 // validateChunk checks, before a single byte is written, that the tree can be written as
 // a RIFF file the readers accept. The readers dispatch on chunk IDs, so a sub-chunk using
 // a structural ID or a nested RIFF chunk would be read back as a different structure.
-func validateChunk(c Chunk, root, allowIncomplete bool) error {
+func validateChunk(c Chunk, root, allowStreaming bool) error {
 	id := c.ChunkID()
 	if !id.Valid() {
-		return fmt.Errorf("%w: chunk ID %q is not printable ASCII", ErrInvalidChunk, id[:])
+		return fmt.Errorf("%w: chunk ID %q is not printable ASCII", ErrUnwritableChunk, id[:])
 	}
 	if _, err := chunkBodySize(c); err != nil {
 		return err
@@ -174,31 +174,31 @@ func validateChunk(c Chunk, root, allowIncomplete bool) error {
 	switch cc := c.(type) {
 	case GroupedChunk:
 		if groupType := cc.GroupType(); !groupType.Valid() {
-			return fmt.Errorf("%w: group type %q of the %s chunk is not printable ASCII", ErrInvalidChunk, groupType[:], id)
+			return fmt.Errorf("%w: group type %q of the %s chunk is not printable ASCII", ErrUnwritableChunk, groupType[:], id)
 		}
 		if root {
 			if id != riffID && id != rifxID {
-				return fmt.Errorf("%w: root chunk ID is %q, want %q or %q", ErrInvalidChunk, id, riffID, rifxID)
+				return fmt.Errorf("%w: root chunk ID is %q, want %q or %q", ErrUnwritableChunk, id, riffID, rifxID)
 			}
 		} else if id != listID {
-			return fmt.Errorf("%w: a %s chunk must not be nested", ErrInvalidChunk, id)
+			return fmt.Errorf("%w: a %s chunk must not be nested", ErrUnwritableChunk, id)
 		}
-		for _, p := range cc.SubChunks() {
-			if err := validateChunk(p, false, allowIncomplete); err != nil {
+		for _, p := range cc.Children() {
+			if err := validateChunk(p, false, allowStreaming); err != nil {
 				return err
 			}
 		}
 	case SubChunk:
 		switch id {
 		case riffID, rifxID, listID:
-			return fmt.Errorf("%w: %s is a grouped-chunk ID but the chunk is a sub-chunk", ErrInvalidChunk, id)
+			return fmt.Errorf("%w: %s is a grouped-chunk ID but the chunk is a sub-chunk", ErrUnwritableChunk, id)
 		}
-		if cc.Incomplete() {
-			if !allowIncomplete {
-				return ErrUnexpectedIncompleteChunk
+		if cc.Streaming() {
+			if !allowStreaming {
+				return ErrUnexpectedStreamingChunk
 			}
 			if b := cc.BodySize(); b != 0 {
-				return fmt.Errorf("%w: chunk[%q] reports %d byte(s) before being written", ErrConsumedIncompleteChunk, id, b)
+				return fmt.Errorf("%w: chunk[%q] reports %d byte(s) before being written", ErrConsumedStreamingChunk, id, b)
 			}
 		}
 	default:
@@ -210,7 +210,7 @@ func validateChunk(c Chunk, root, allowIncomplete bool) error {
 
 var paddingByte = [1]byte{0x00}
 
-func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowIncomplete bool) (n int64, err error) {
+func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming bool) (n int64, err error) {
 	n, err = writeChunkHeader(w, c, order)
 	if err != nil {
 		err = fmt.Errorf("chunk[%q] header: %w", c.ChunkID(), err)
@@ -218,7 +218,7 @@ func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowIncomplete bo
 	}
 
 	var nn int64
-	nn, err = writeChunkBody(w, c, order, allowIncomplete)
+	nn, err = writeChunkBody(w, c, order, allowStreaming)
 	n += nn
 	if err != nil {
 		err = fmt.Errorf("chunk[%q] body: %w", c.ChunkID(), err)
@@ -302,12 +302,12 @@ func writeChunkBodySizeAt(w io.WriterAt, order binary.ByteOrder, b uint32, off i
 	return w.WriteAt(buf[:], off)
 }
 
-func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowIncomplete bool) (n int64, err error) {
+func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming bool) (n int64, err error) {
 	switch cc := c.(type) {
 	case GroupedChunk:
 		var nn int64
-		for i, p := range cc.SubChunks() {
-			nn, err = writeChunk(w, p, order, allowIncomplete)
+		for i, p := range cc.Children() {
+			nn, err = writeChunk(w, p, order, allowStreaming)
 			n += nn
 			if err != nil {
 				err = fmt.Errorf("payload[%d]: %w", i, err)
@@ -315,13 +315,13 @@ func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowIncomplet
 			}
 		}
 	case SubChunk:
-		if cc.Incomplete() {
-			if !allowIncomplete {
-				err = ErrUnexpectedIncompleteChunk
+		if cc.Streaming() {
+			if !allowStreaming {
+				err = ErrUnexpectedStreamingChunk
 				return
 			}
 
-			// the body size of an incomplete chunk is only known once it has been read,
+			// the body size of a streaming chunk is only known once it has been read,
 			// so there is nothing to verify it against
 			n, err = io.Copy(w, cc.Body())
 			return

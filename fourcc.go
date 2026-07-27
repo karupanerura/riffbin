@@ -54,9 +54,9 @@ func ParseFourCC(s string) (FourCC, error) {
 	return f, nil
 }
 
-// MustFourCC is like ParseFourCC but panics on error.
+// MustParseFourCC is like ParseFourCC but panics on error.
 // It is intended for four-character codes known at compile time.
-func MustFourCC(s string) FourCC {
+func MustParseFourCC(s string) FourCC {
 	f, err := ParseFourCC(s)
 	if err != nil {
 		panic(err)
