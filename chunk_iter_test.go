@@ -102,6 +102,32 @@ func TestChunks(t *testing.T) {
 	})
 }
 
+// pipeLikeReader satisfies ReadSeekerAt by type, but its stream cannot seek —
+// like *os.File when it is a pipe or a terminal.
+type pipeLikeReader struct{ *bytes.Reader }
+
+func (pipeLikeReader) Seek(int64, int) (int64, error) {
+	return 0, errors.New("illegal seek")
+}
+
+// A source that satisfies ReadSeekerAt by type but cannot actually seek must be
+// read through, not fail before the first byte — Chunks(os.Stdin) on a pipe.
+func TestChunksReadsThroughWhenSeekingFails(t *testing.T) {
+	t.Parallel()
+
+	expected, err := collectChunks(t, onlyReader{bytes.NewReader(paddedFileBytes)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := collectChunks(t, pipeLikeReader{bytes.NewReader(paddedFileBytes)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if df := cmp.Diff(expected, got); df != "" {
+		t.Errorf("diff = %s", df)
+	}
+}
+
 // A body left unread must be skipped, and BodyOffset must address it for later
 // reads — the streaming equivalent of what ReadSections provides.
 func TestChunksBodyOffsetAddressesUnreadBodies(t *testing.T) {

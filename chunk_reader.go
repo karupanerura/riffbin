@@ -96,7 +96,8 @@ func (c ChunkInfo) Grouped() bool { return c.GroupType != (FourCC{}) }
 // A grouped chunk is yielded once, before the chunks it contains; where it ends
 // is implied by the Depth of the chunks that follow. When r also implements
 // ReadSeekerAt, bodies left unread are skipped by seeking rather than read
-// through, and BodyOffset addresses them for later reads.
+// through, and BodyOffset addresses them for later reads. A value whose stream
+// cannot actually seek — os.Stdin on a pipe or a terminal — is read through.
 //
 // The iteration yields at most one error, as its final pair: io.EOF when the
 // input ends before the first byte of the root chunk header, a SyntaxError
@@ -109,8 +110,10 @@ func Chunks(r io.Reader, opts ...ReaderOption) iter.Seq2[ChunkInfo, error] {
 		limit := int64(-1)
 		pr, _ := r.(ReadSeekerAt)
 		if pr != nil {
-			var err error
-			if _, limit, err = measure(pr); err != nil {
+			if _, err := pr.Seek(0, io.SeekCurrent); err != nil {
+				// the type can seek but the stream cannot: read bodies through
+				pr = nil
+			} else if _, limit, err = measure(pr); err != nil {
 				yield(ChunkInfo{}, err)
 				return
 			}
