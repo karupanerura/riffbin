@@ -179,8 +179,8 @@ func TestChunksBodyIsRevokedWhenIterationAdvances(t *testing.T) {
 			stale = info.Body // keep the first leaf's body for later
 			continue
 		}
-		if _, err := io.ReadAll(stale); err == nil {
-			t.Error("reading a stale body should fail")
+		if _, err := io.ReadAll(stale); !errors.Is(err, riffbin.ErrRevokedBody) {
+			t.Errorf("reading a stale body should be ErrRevokedBody but got: %v", err)
 		}
 	}
 }

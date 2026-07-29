@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"math"
 	"slices"
 	"strings"
 )
@@ -79,7 +80,7 @@ type ChunkInfo struct {
 
 	// Body reads the payload of a leaf chunk; it is nil for a grouped chunk.
 	// It is only valid until the iteration advances: whatever is left unread
-	// by then is skipped, and later reads report an error.
+	// by then is skipped, and later reads report ErrRevokedBody.
 	Body io.Reader
 }
 
@@ -104,7 +105,8 @@ func (c ChunkInfo) Grouped() bool { return c.GroupType != (FourCC{}) }
 // wrapping ErrInvalidFormat for malformed input, or the underlying reader's own
 // error, returned as is. Like the other readers, with AllowTrailingData the
 // iteration consumes exactly one root chunk, so calling Chunks again reads the
-// next chunk of a concatenated stream.
+// next chunk of a concatenated stream — as does ranging the same iterator
+// again, which reads onward from wherever the input then stands.
 func Chunks(r io.Reader, opts ...ReaderOption) iter.Seq2[ChunkInfo, error] {
 	return func(yield func(ChunkInfo, error) bool) {
 		limit := int64(-1)
@@ -197,6 +199,9 @@ func measure(r io.Seeker) (origin, limit int64, err error) {
 // buildTree assembles the chunk tree from the events of a scan. With sec
 // non-nil the leaf bodies stay in the stream, referenced as SectionSubChunk
 // values at origin-relative offsets; otherwise every body is read into memory.
+// The stack indexing leans on scan's contract — the first event is a grouped
+// chunk at depth 0, and depths never skip a level — so a scan bug panics here
+// rather than assembling a wrong tree.
 func buildTree(seq iter.Seq2[ChunkInfo, error], sec io.ReaderAt, origin int64) (*RIFFChunk, error) {
 	var root *RIFFChunk
 	var stack []*[]Chunk // the children of every open grouped chunk, outermost first
@@ -227,7 +232,7 @@ func buildTree(seq iter.Seq2[ChunkInfo, error], sec io.ReaderAt, origin int64) (
 		if sec != nil {
 			leaf = &SectionSubChunk{ID: info.ID, SectionReader: io.NewSectionReader(sec, origin+info.BodyOffset, info.BodySize)}
 		} else {
-			payload, err := readLeafBody(info.Body, info.BodySize)
+			payload, err := readLeafBody(info.ID, info.Body, info.BodySize)
 			if err != nil {
 				return nil, err
 			}
@@ -247,7 +252,12 @@ func buildTree(seq iter.Seq2[ChunkInfo, error], sec io.ReaderAt, origin int64) (
 // untrusted even after the parser's bounds checks, because the enclosing sizes
 // it was checked against are untrusted too: the buffer grows as bytes actually
 // arrive, so a bogus size field cannot force a huge allocation.
-func readLeafBody(r io.Reader, size int64) ([]byte, error) {
+func readLeafBody(id FourCC, r io.Reader, size int64) ([]byte, error) {
+	// int is 32 bits on 32-bit platforms, where a body beyond what a []byte can
+	// hold must fail cleanly instead of dying in the allocator mid-read
+	if size > math.MaxInt {
+		return nil, fmt.Errorf("riffbin: the %s chunk declares a %d byte body, more than this platform holds in memory", id, size)
+	}
 	payload := []byte{}
 	for int64(len(payload)) < size {
 		step := int(min(size-int64(len(payload)), 64<<10))
@@ -495,7 +505,7 @@ type bodyReader struct{ p *parser }
 func (b *bodyReader) Read(q []byte) (int, error) {
 	p := b.p
 	if p.body != b {
-		return 0, errors.New("riffbin: chunk body read after the iteration advanced")
+		return 0, ErrRevokedBody
 	}
 	if p.bodyRemaining == 0 {
 		return 0, io.EOF
