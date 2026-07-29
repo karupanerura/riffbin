@@ -18,7 +18,8 @@ var (
 	ErrChunkTooLarge = errors.New("riffbin: chunk too large")
 
 	// ErrSizeMismatch is returned when a sub-chunk produces a different number of bytes than
-	// its BodySize reports. Writing it would emit a corrupt file, so the write fails instead.
+	// its BodySize reports. The write stops where the mismatch is found rather than
+	// completing a corrupt file; the bytes already written remain in the output.
 	ErrSizeMismatch = errors.New("riffbin: chunk body size mismatch")
 
 	// ErrUnsupportedChunkType is returned when a Chunk implements neither GroupedChunk nor SubChunk.
@@ -29,7 +30,8 @@ var (
 
 	// ErrUnwritableChunk is returned when a chunk tree cannot be written as a RIFF file that the
 	// readers would accept: a FourCC that is not printable ASCII, a sub-chunk whose ID is a
-	// structural ID such as "LIST", or a grouped chunk below the root that is not a LIST.
+	// structural ID such as "LIST", a grouped chunk below the root that is not a LIST, or
+	// chunks nested deeper than the readers read back.
 	ErrUnwritableChunk = errors.New("riffbin: unwritable chunk")
 
 	// ErrConsumedStreamingChunk is returned when a streaming sub-chunk is written after its
@@ -41,7 +43,8 @@ var (
 // SyntaxError describes a malformed RIFF structure and where it was found.
 // It wraps ErrInvalidFormat, so errors.Is(err, ErrInvalidFormat) reports true.
 // It is reserved for defects of the input itself: an I/O failure of the
-// underlying reader is returned as is, not classified as a SyntaxError.
+// underlying reader is never classified as a SyntaxError — it surfaces as the
+// reader's own error, at most wrapped with context, so errors.Is matches it.
 type SyntaxError struct {
 	// Offset is the byte offset at which the problem was detected, counted
 	// from the position the reader was at when the read call was made.

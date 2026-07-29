@@ -34,7 +34,8 @@
 // [ReadAll] accepts any io.Reader and materializes every sub-chunk body in
 // memory as an [InMemorySubChunk]. [ReadSections] needs a [ReadSeekerAt] and
 // skips the bodies, returning a [SectionSubChunk] that reads from the original
-// stream on demand; use it for files too large to hold in memory. [Chunks]
+// stream on demand; use it for files whose payloads are too large to hold in
+// memory — its tree still grows with the number of chunks. [Chunks]
 // builds no tree at all: it yields every chunk in document order as the input
 // is scanned, keeping memory proportional to the nesting depth — for files
 // with too many chunks to hold even their headers, such as an AVI file, which
@@ -44,7 +45,8 @@
 //
 // Every reader is strict by default. Malformed input yields a [SyntaxError],
 // which carries the byte offset and the chunk path and wraps [ErrInvalidFormat];
-// an I/O failure of the underlying reader is returned as is:
+// an I/O failure of the underlying reader surfaces as the reader's own error,
+// matched with errors.Is, and never as a format error:
 //
 //	chunk, err := riffbin.ReadAll(r)
 //	if errors.Is(err, riffbin.ErrInvalidFormat) {
@@ -71,11 +73,12 @@
 // A non-streaming sub-chunk can be written repeatedly: [SubChunk.Body] hands out an
 // independent reader on every call. Before the first byte is written, the tree is
 // checked against what the readers accept: a non-ASCII FourCC, a sub-chunk using a
-// structural ID such as "LIST", or a nested RIFF chunk fails with [ErrUnwritableChunk],
-// and a streaming sub-chunk whose stream was already consumed fails with
-// [ErrConsumedStreamingChunk]. A write that would produce a file inconsistent
-// with the declared sizes fails with [ErrSizeMismatch] or [ErrChunkTooLarge] rather
-// than emitting corrupt bytes.
+// structural ID such as "LIST", a nested RIFF chunk or nesting too deep to read back
+// fails with [ErrUnwritableChunk], and a streaming sub-chunk whose stream was already
+// consumed fails with [ErrConsumedStreamingChunk]. Sizes the tree misdeclares fail
+// with [ErrChunkTooLarge] up front; a body that produces a different number of bytes
+// than it declares is only caught as it is copied, failing with [ErrSizeMismatch]
+// where the write stops — the header and part of the body are already emitted.
 //
 // # Byte order
 //

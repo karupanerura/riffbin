@@ -138,9 +138,10 @@ func ReadAll(r io.Reader, opts ...ReaderOption) (*RIFFChunk, error) {
 
 // ReadSections reads one RIFF chunk from r, skipping over the sub-chunk bodies
 // and returning *SectionSubChunk values that read them from r on demand; use
-// it for files too large to hold in memory. All boundaries are relative to the
-// position r is at when the call is made, so a RIFF chunk embedded mid-stream
-// can be read in place.
+// it for files whose payloads are too large to hold in memory. Its tree still
+// grows with the number of chunks — for files with too many chunks for that,
+// use Chunks. All boundaries are relative to the position r is at when the
+// call is made, so a RIFF chunk embedded mid-stream can be read in place.
 //
 // Like ReadAll, it yields io.EOF when the input ends before the root chunk
 // header, and with AllowTrailingData it leaves r right after the root chunk,
