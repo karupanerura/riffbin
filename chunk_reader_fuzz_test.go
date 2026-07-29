@@ -3,6 +3,7 @@ package riffbin_test
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -204,8 +205,24 @@ func FuzzReadersAgree(f *testing.F) {
 			streamed, streamedErr := chunksFlatten(t, struct{ io.Reader }{bytes.NewReader(b)}, mode.opts...)
 			seeked, seekedErr := chunksFlatten(t, bytes.NewReader(b), mode.opts...)
 
+			// the readers must agree not only on accept/reject but on the kind of
+			// rejection: a format error for one must not be clean EOF for another
+			errKind := func(err error) string {
+				switch {
+				case err == nil:
+					return "accepted"
+				case errors.Is(err, riffbin.ErrInvalidFormat):
+					return "invalid format"
+				case errors.Is(err, riffbin.ErrUnsupportedFormat):
+					return "unsupported format"
+				case errors.Is(err, io.EOF):
+					return "clean EOF"
+				default:
+					return "other"
+				}
+			}
 			for name, err := range map[string]error{"ReadSections": sectionsErr, "Chunks": streamedErr, "Chunks(seeking)": seekedErr} {
-				if (fullErr == nil) != (err == nil) {
+				if errKind(fullErr) != errKind(err) {
 					t.Log(hex.Dump(b))
 					t.Fatalf("%s: the readers disagree: ReadAll=%v %s=%v", mode.name, fullErr, name, err)
 				}
