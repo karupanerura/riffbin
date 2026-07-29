@@ -31,7 +31,7 @@ func NewWriter(w io.Writer) *Writer {
 // WriteChunk writes the RIFF chunk tree to the underlying data stream.
 // It returns the number of bytes written and any error encountered that caused the write to stop early.
 func (w *Writer) WriteChunk(c *RIFFChunk) (int64, error) {
-	if err := validateChunk(c, true, false); err != nil {
+	if err := validateChunk(c, true, false, 0); err != nil {
 		return 0, err
 	}
 	return writeChunk(w.w, c, c.ByteOrder.binary(), false)
@@ -62,7 +62,7 @@ func NewStreamingWriter(w io.WriteSeeker) (*StreamingWriter, error) {
 // and re-writes every chunk size field once the streaming bodies have been consumed.
 // It returns the number of bytes written and any error encountered that caused the write to stop early.
 func (w *StreamingWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
-	if err = validateChunk(c, true, true); err != nil {
+	if err = validateChunk(c, true, true, 0); err != nil {
 		return 0, err
 	}
 
@@ -161,18 +161,20 @@ func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
 
 // validateChunk checks, before a single byte is written, that the tree can be written as
 // a RIFF file the readers accept. The readers dispatch on chunk IDs, so a sub-chunk using
-// a structural ID or a nested RIFF chunk would be read back as a different structure.
-func validateChunk(c Chunk, root, allowStreaming bool) error {
+// a structural ID or a nested RIFF chunk would be read back as a different structure; they
+// also refuse chunks nested deeper than maxGroupDepth, so such a tree is rejected here
+// with an error instead of exhausting the stack.
+func validateChunk(c Chunk, root, allowStreaming bool, depth int) error {
 	id := c.ChunkID()
 	if !id.Valid() {
 		return fmt.Errorf("%w: chunk ID %q is not printable ASCII", ErrUnwritableChunk, id[:])
 	}
-	if _, err := chunkBodySize(c); err != nil {
-		return err
-	}
 
 	switch cc := c.(type) {
 	case GroupedChunk:
+		if depth >= maxGroupDepth {
+			return fmt.Errorf("%w: chunks are nested deeper than %d levels", ErrUnwritableChunk, maxGroupDepth)
+		}
 		if groupType := cc.GroupType(); !groupType.Valid() {
 			return fmt.Errorf("%w: group type %q of the %s chunk is not printable ASCII", ErrUnwritableChunk, groupType[:], id)
 		}
@@ -184,7 +186,7 @@ func validateChunk(c Chunk, root, allowStreaming bool) error {
 			return fmt.Errorf("%w: a %s chunk must not be nested", ErrUnwritableChunk, id)
 		}
 		for _, p := range cc.Children() {
-			if err := validateChunk(p, false, allowStreaming); err != nil {
+			if err := validateChunk(p, false, allowStreaming, depth+1); err != nil {
 				return err
 			}
 		}
@@ -205,6 +207,12 @@ func validateChunk(c Chunk, root, allowStreaming bool) error {
 		return unsupportedChunkTypeError(c)
 	}
 
+	// the size check runs after the subtree is validated: computing a grouped
+	// chunk's size recurses through it, which is only safe once the depth check
+	// above has bounded the nesting
+	if _, err := chunkBodySize(c); err != nil {
+		return err
+	}
 	return nil
 }
 

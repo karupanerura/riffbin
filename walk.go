@@ -8,20 +8,21 @@ import "iter"
 // chunk of interest.
 func Walk(c Chunk) iter.Seq[Chunk] {
 	return func(yield func(Chunk) bool) {
-		walk(c, yield)
-	}
-}
-
-func walk(c Chunk, yield func(Chunk) bool) bool {
-	if !yield(c) {
-		return false
-	}
-	if g, ok := c.(GroupedChunk); ok {
-		for _, child := range g.Children() {
-			if !walk(child, yield) {
-				return false
+		// an explicit stack instead of recursion: a hand-built tree can nest
+		// deeper than the call stack, and the walk must not crash on it
+		stack := []Chunk{c}
+		for len(stack) > 0 {
+			cur := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if !yield(cur) {
+				return
+			}
+			if g, ok := cur.(GroupedChunk); ok {
+				children := g.Children()
+				for i := len(children) - 1; i >= 0; i-- {
+					stack = append(stack, children[i])
+				}
 			}
 		}
 	}
-	return true
 }

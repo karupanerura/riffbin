@@ -142,6 +142,58 @@ func TestWriterValidatesTreeBeforeWriting(t *testing.T) {
 	}
 }
 
+// The readers refuse chunks nested deeper than 100 levels, so the writers refuse
+// to produce such a file — with an error, not a stack overflow: validation and
+// size computation recurse per level, and a hand-built tree can nest arbitrarily.
+func TestWriterRejectsTooDeepNesting(t *testing.T) {
+	t.Parallel()
+
+	deepTree := func(groups int) *riffbin.RIFFChunk {
+		var c riffbin.Chunk = &riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DATA"), Payload: []byte("ab")}
+		for i := 0; i < groups-1; i++ {
+			c = &riffbin.ListChunk{ListType: riffbin.MustParseFourCC("DEEP"), Payload: []riffbin.Chunk{c}}
+		}
+		return &riffbin.RIFFChunk{FormType: riffbin.MustParseFourCC("TEST"), Payload: []riffbin.Chunk{c}}
+	}
+
+	t.Run("OneTooDeep", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		n, err := riffbin.NewWriter(&buf).WriteChunk(deepTree(101))
+		if !errors.Is(err, riffbin.ErrUnwritableChunk) {
+			t.Errorf("Writer: should be ErrUnwritableChunk but got: %v", err)
+		}
+		if n != 0 || buf.Len() != 0 {
+			t.Errorf("Writer: wrote %d byte(s) before failing", buf.Len())
+		}
+
+		m := &memWriteSeeker{}
+		w, err := riffbin.NewStreamingWriter(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err = w.WriteChunk(deepTree(101))
+		if !errors.Is(err, riffbin.ErrUnwritableChunk) {
+			t.Errorf("StreamingWriter: should be ErrUnwritableChunk but got: %v", err)
+		}
+		if n != 0 || len(m.buf) != 0 {
+			t.Errorf("StreamingWriter: wrote %d byte(s) before failing", len(m.buf))
+		}
+	})
+	t.Run("DeepestAllowed", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		if _, err := riffbin.NewWriter(&buf).WriteChunk(deepTree(100)); err != nil {
+			t.Fatalf("should write the deepest tree the readers accept but got: %v", err)
+		}
+		if _, err := riffbin.ReadAll(bytes.NewReader(buf.Bytes())); err != nil {
+			t.Errorf("the readers should read it back but got: %v", err)
+		}
+	})
+}
+
 // A single StreamingWriter must be able to write several chunks in a row:
 // each backfill is relative to where its own chunk started.
 func TestStreamingWriterConsecutiveWrites(t *testing.T) {
