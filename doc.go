@@ -57,7 +57,8 @@
 // concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the 32-bit
 // size field by appending RIFF("AVIX") chunks — is read by calling [ReadAll]
 // or [ReadSections] repeatedly until io.EOF; [Concatenated] wraps that loop
-// as an iterator.
+// as an iterator. A pad byte that a chunk's writer left uncounted in its RIFF
+// size is skipped before the next chunk of such a stream.
 //
 // # Writing
 //

@@ -371,6 +371,89 @@ func TestReadConcatenatedRIFFChunks(t *testing.T) {
 	})
 }
 
+// A writer that pads its odd-sized final chunk without counting the pad byte in the
+// RIFF size leaves a 0x00 between the chunks of a concatenated stream — the byte
+// verifyEnd tolerates after a single chunk. AllowTrailingData must skip it, or the
+// next call starts at the pad byte and misreads the root chunk header.
+func TestReadConcatenatedRIFFChunksWithUncountedPad(t *testing.T) {
+	t.Parallel()
+
+	// the RIFF size 0x0F does not count ENT1's pad byte, so the trailing 0x00
+	// lies outside the declared root chunk body
+	padded := []byte{
+		'R', 'I', 'F', 'F', 0x0F, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0x00,
+	}
+	// the same chunk from a writer that omits the pad byte entirely: the next
+	// header follows the odd body directly and must not lose its first byte
+	unpadded := padded[:len(padded)-1]
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT1"), Payload: []byte("abc")}},
+	})
+
+	streams := map[string][]byte{
+		"UncountedPads": append(append([]byte{}, padded...), padded...),
+		"NoPads":        append(append([]byte{}, unpadded...), unpadded...),
+		"PadThenNoPad":  append(append([]byte{}, padded...), unpadded...),
+	}
+
+	for name, stream := range streams {
+		name, stream := name, stream
+		t.Run("ReadAll/"+name, func(t *testing.T) {
+			t.Parallel()
+
+			r := bytes.NewReader(stream)
+			for i := 0; i < 2; i++ {
+				got, err := riffbin.ReadAll(r, riffbin.AllowTrailingData())
+				if err != nil {
+					t.Fatalf("chunk %d: %v", i, err)
+				}
+				if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+					t.Errorf("chunk %d: diff = %s", i, df)
+				}
+			}
+			if _, err := riffbin.ReadAll(r, riffbin.AllowTrailingData()); !errors.Is(err, io.EOF) {
+				t.Errorf("should be io.EOF at the end of the stream but got: %v", err)
+			}
+		})
+		t.Run("ReadSections/"+name, func(t *testing.T) {
+			t.Parallel()
+
+			r := bytes.NewReader(stream)
+			for i := 0; i < 2; i++ {
+				got, err := riffbin.ReadSections(r, riffbin.AllowTrailingData())
+				if err != nil {
+					t.Fatalf("chunk %d: %v", i, err)
+				}
+				if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+					t.Errorf("chunk %d: diff = %s", i, df)
+				}
+			}
+			if _, err := riffbin.ReadSections(r, riffbin.AllowTrailingData()); !errors.Is(err, io.EOF) {
+				t.Errorf("should be io.EOF at the end of the stream but got: %v", err)
+			}
+		})
+		t.Run("Concatenated/"+name, func(t *testing.T) {
+			t.Parallel()
+
+			n := 0
+			for got, err := range riffbin.Concatenated(bytes.NewReader(stream)) {
+				if err != nil {
+					t.Fatalf("chunk %d: %v", n, err)
+				}
+				if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+					t.Errorf("chunk %d: diff = %s", n, df)
+				}
+				n++
+			}
+			if n != 2 {
+				t.Errorf("should yield 2 chunks but got: %d", n)
+			}
+		})
+	}
+}
+
 func TestReadUnsupportedContainers(t *testing.T) {
 	t.Parallel()
 

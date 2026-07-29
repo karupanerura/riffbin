@@ -40,6 +40,13 @@ var fuzzSeeds = [][]byte{
 		'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0x00,
 	},
+	// a concatenated-stream fragment: the uncounted pad byte of a previous chunk,
+	// then a complete RIFF chunk (read with AllowTrailingData, rejected without)
+	{
+		0x00,
+		'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0x00,
+	},
 	// an odd-sized chunk whose pad byte holds garbage
 	{
 		'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',

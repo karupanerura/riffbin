@@ -48,9 +48,11 @@ func AllowPaddingViolations() ReaderOption {
 
 // AllowTrailingData ignores any bytes that follow the RIFF chunk instead of rejecting
 // them: the call consumes exactly the root chunk and leaves the input right after it,
-// which is how a stream of concatenated RIFF chunks is read. Without it a single 0x00
-// is still tolerated after an odd-sized final chunk, because writers commonly append
-// its pad byte without counting it in the RIFF chunk size.
+// which is how a stream of concatenated RIFF chunks is read. A single 0x00 before the
+// root chunk header is skipped — the pad byte of a previous chunk whose writer did not
+// count it in the RIFF chunk size, which no chunk header can start with — so such
+// streams read on. Without the option that byte is still tolerated at the very end of
+// the input, after an odd-sized final chunk.
 func AllowTrailingData() ReaderOption {
 	return readerOptionFunc(func(c *readerConfig) { c.allowTrailingData = true })
 }
@@ -311,14 +313,35 @@ func scan(r io.Reader, pr ReadSeekerAt, limit int64, opts []ReaderOption, yield 
 
 	// read the root header. a clean end of input before its first byte is io.EOF,
 	// not a syntax error, so that a stream of concatenated RIFF chunks can be read
-	// until it runs dry.
+	// until it runs dry. with AllowTrailingData a single 0x00 before the header is
+	// skipped first: it is the pad byte of a previous root chunk whose writer did
+	// not count it in the RIFF size — the byte verifyEnd tolerates after a single
+	// chunk — and no chunk header can start with 0x00, so the byte is unambiguous.
 	var buf [HeaderBytes]byte
-	if _, err := io.ReadFull(p.src, buf[:]); err != nil {
+	headerOff, read := int64(0), 0
+	if p.conf.allowTrailingData {
+		for {
+			if _, err := io.ReadFull(p.src, buf[:1]); err != nil {
+				if errors.Is(err, io.EOF) {
+					yield(ChunkInfo{}, io.EOF)
+				} else {
+					yield(ChunkInfo{}, err)
+				}
+				return
+			}
+			if buf[0] != 0x00 || headerOff > 0 {
+				break
+			}
+			headerOff = 1
+		}
+		read = 1
+	}
+	if _, err := io.ReadFull(p.src, buf[read:]); err != nil {
 		switch {
-		case errors.Is(err, io.EOF):
+		case errors.Is(err, io.EOF) && read == 0:
 			yield(ChunkInfo{}, io.EOF)
-		case errors.Is(err, io.ErrUnexpectedEOF):
-			yield(ChunkInfo{}, p.syntaxError(0, "unexpected end of input while reading the root chunk header"))
+		case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+			yield(ChunkInfo{}, p.syntaxError(headerOff, "unexpected end of input while reading the root chunk header"))
 		default:
 			yield(ChunkInfo{}, err)
 		}
@@ -337,14 +360,14 @@ func scan(r io.Reader, pr ReadSeekerAt, limit int64, opts []ReaderOption, yield 
 		yield(ChunkInfo{}, fmt.Errorf("%w: %s containers are not supported", ErrUnsupportedFormat, id))
 		return
 	default:
-		yield(ChunkInfo{}, p.syntaxError(0, "root chunk ID is %q, want %q or %q", id, riffID, rifxID))
+		yield(ChunkInfo{}, p.syntaxError(headerOff, "root chunk ID is %q, want %q or %q", id, riffID, rifxID))
 		return
 	}
 
 	bodyLen := int64(p.order.Uint32(buf[IDBytes:]))
 	end := p.src.off + bodyLen
 	if p.limit >= 0 && end > p.limit {
-		yield(ChunkInfo{}, p.syntaxError(IDBytes, "root chunk declares a %d byte body but the input holds only %d byte(s)", bodyLen, p.limit-p.src.off))
+		yield(ChunkInfo{}, p.syntaxError(headerOff+IDBytes, "root chunk declares a %d byte body but the input holds only %d byte(s)", bodyLen, p.limit-p.src.off))
 		return
 	}
 
