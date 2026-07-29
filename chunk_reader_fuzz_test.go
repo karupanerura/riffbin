@@ -32,7 +32,7 @@ var fuzzSeeds = [][]byte{
 	},
 	// a nested RIFF chunk, which the specification does not allow
 	{
-		'R', 'I', 'F', 'F', 0x14, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 		'R', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'N', 'E', 'S', 'T',
 	},
 	// an odd-sized chunk with its pad byte

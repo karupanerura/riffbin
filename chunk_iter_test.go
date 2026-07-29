@@ -281,8 +281,9 @@ func TestConcatenated(t *testing.T) {
 }
 
 // The streaming parser accepts a superset of nothing: exactly what the tree
-// readers accept, and lenient mode agrees too. (The fuzz target extends this
-// property to arbitrary inputs.)
+// readers accept, under every combination of the reader options — the inputs
+// are chosen so that each option flips some verdict. (The fuzz target extends
+// this property to arbitrary inputs.)
 func TestChunksAgreesWithTreeReaders(t *testing.T) {
 	t.Parallel()
 
@@ -290,22 +291,47 @@ func TestChunksAgreesWithTreeReaders(t *testing.T) {
 		"padded":  paddedFileBytes,
 		"rifx":    rifxFileBytes,
 		"garbage": []byte("RIFFgarbage!"),
+		// an unpadded odd chunk with a sibling: strict fails on the pad byte
+		"unpadded": {
+			'R', 'I', 'F', 'F', 0x1B, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+			'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c',
+			'E', 'N', 'T', '2', 0x04, 0x00, 0x00, 0x00, 'w', 'x', 'y', 'z',
+		},
+		// a pad byte holding garbage
+		"garbagePad": {
+			'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+			'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0xFF,
+		},
+		// data after the root chunk
+		"trailingData": append(append([]byte{}, paddedFileBytes...), "junk"...),
+		// the uncounted pad byte of a previous concatenated chunk
+		"leadingPad": append([]byte{0x00}, paddedFileBytes...),
 	}
-	for name, b := range inputs {
-		name, b := name, b
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			_, treeErr := riffbin.ReadAll(bytes.NewReader(b))
-			_, chunksErr := collectChunks(t, onlyReader{bytes.NewReader(b)})
-			if (treeErr == nil) != (chunksErr == nil) {
-				t.Errorf("the readers disagree: ReadAll=%v Chunks=%v", treeErr, chunksErr)
-			}
-		})
+	modes := map[string][]riffbin.ReaderOption{
+		"strict":           nil,
+		"paddingViolation": {riffbin.AllowPaddingViolations()},
+		"trailingData":     {riffbin.AllowTrailingData()},
+		"lenient":          {riffbin.AllowPaddingViolations(), riffbin.AllowTrailingData()},
+	}
+	for mode, opts := range modes {
+		for name, b := range inputs {
+			mode, opts, name, b := mode, opts, name, b
+			t.Run(mode+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				_, treeErr := riffbin.ReadAll(bytes.NewReader(b), opts...)
+				_, chunksErr := collectChunks(t, onlyReader{bytes.NewReader(b)}, opts...)
+				if (treeErr == nil) != (chunksErr == nil) {
+					t.Errorf("the readers disagree: ReadAll=%v Chunks=%v", treeErr, chunksErr)
+				}
+			})
+		}
 	}
 }
 
 // A leaf body must be readable through any reader shape, including one byte at
-// a time straddling the internal 64 KiB materialization steps.
+// a time — Body reads straight from the source, so short reads must track
+// BodySize exactly. (The 64 KiB materialization steps belong to ReadAll's
+// tree building, which Chunks never runs.)
 func TestChunksBodyByteAtATime(t *testing.T) {
 	t.Parallel()
 

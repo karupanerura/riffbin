@@ -206,16 +206,18 @@ func TestReadRejectsSpecViolations(t *testing.T) {
 		Name  string
 		Bytes []byte
 	}{
+		// the root sizes match the content exactly: an oversized root would trip
+		// ReadSections' input-length check before the check each case is named for
 		{"NestedRIFFChunk", []byte{
-			'R', 'I', 'F', 'F', 0x14, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+			'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 			'R', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'N', 'E', 'S', 'T',
 		}},
 		{"NestedRIFXChunk", []byte{
-			'R', 'I', 'F', 'F', 0x14, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+			'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 			'R', 'I', 'F', 'X', 0x04, 0x00, 0x00, 0x00, 'N', 'E', 'S', 'T',
 		}},
 		{"NonASCIIChunkID", []byte{
-			'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+			'R', 'I', 'F', 'F', 0x0C, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 			'E', 'N', 'T', 0x00, 0x00, 0x00, 0x00, 0x00,
 		}},
 		{"NonASCIIFormType", []byte{
