@@ -79,8 +79,11 @@ type ChunkInfo struct {
 	BodyOffset int64
 
 	// Body reads the payload of a leaf chunk; it is nil for a grouped chunk.
-	// It is only valid until the iteration advances: whatever is left unread
-	// by then is skipped, and later reads report ErrRevokedBody.
+	// It is only valid while the iteration stands at this chunk: once the
+	// iteration moves on — to the next chunk, or out of the loop entirely,
+	// a break included — reads report ErrRevokedBody. Whatever advancing
+	// leaves unread is skipped; to read a body after the loop, use
+	// BodyOffset with a seekable source.
 	Body io.Reader
 }
 
@@ -92,7 +95,8 @@ func (c ChunkInfo) Grouped() bool { return c.GroupType != (FourCC{}) }
 // depth-first document order — the order they appear in the input. It is the
 // streaming counterpart of ReadAll and ReadSections: no tree is built, memory
 // stays proportional to the nesting depth, and breaking out of the loop stops
-// reading, so a search can end at the first chunk of interest.
+// reading, so a search can end at the first chunk of interest. Read a leaf's
+// Body inside the loop: ending the iteration revokes it like advancing does.
 //
 // A grouped chunk is yielded once, before the chunks it contains; where it ends
 // is implied by the Depth of the chunks that follow. When r also implements

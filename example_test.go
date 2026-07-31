@@ -139,7 +139,7 @@ func Example_streamChunks() {
 			log.Fatal(err)
 		}
 		if !info.Grouped() && info.ID == riffbin.MustParseFourCC("fmt") {
-			fmtBody, err := io.ReadAll(info.Body) // valid until the iteration advances
+			fmtBody, err := io.ReadAll(info.Body) // read before break: Body dies with the iteration
 			if err != nil {
 				log.Fatal(err)
 			}

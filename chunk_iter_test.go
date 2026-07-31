@@ -185,6 +185,26 @@ func TestChunksBodyIsRevokedWhenIterationAdvances(t *testing.T) {
 	}
 }
 
+// Ending the iteration revokes the body like advancing does: a break is not a
+// way to keep the reader. BodyOffset addresses the body afterwards instead.
+func TestChunksBodyIsRevokedWhenIterationEnds(t *testing.T) {
+	t.Parallel()
+
+	var kept io.Reader
+	for info, err := range riffbin.Chunks(onlyReader{bytes.NewReader(paddedFileBytes)}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Grouped() {
+			kept = info.Body
+			break
+		}
+	}
+	if _, err := io.ReadAll(kept); !errors.Is(err, riffbin.ErrRevokedBody) {
+		t.Errorf("reading the body after breaking out should be ErrRevokedBody but got: %v", err)
+	}
+}
+
 func TestChunksEmptyInput(t *testing.T) {
 	t.Parallel()
 

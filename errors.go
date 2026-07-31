@@ -15,9 +15,9 @@ var (
 	ErrUnsupportedFormat = errors.New("riffbin: unsupported format")
 
 	// ErrRevokedBody is returned when a ChunkInfo.Body is read after the iteration
-	// has advanced: the stream has moved past the chunk, so the reader is revoked
-	// instead of misreading whatever comes next.
-	ErrRevokedBody = errors.New("riffbin: chunk body read after the iteration advanced")
+	// has moved on — advanced past the chunk, or ended, a break included. The
+	// reader is revoked instead of misreading whatever comes next.
+	ErrRevokedBody = errors.New("riffbin: chunk body read after the iteration moved on")
 
 	// ErrChunkTooLarge is returned when a chunk body does not fit in the 32-bit RIFF size field.
 	ErrChunkTooLarge = errors.New("riffbin: chunk too large")
