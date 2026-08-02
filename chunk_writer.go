@@ -34,7 +34,7 @@ func (w *Writer) WriteChunk(c *RIFFChunk) (int64, error) {
 	if err := validateTree(c, false); err != nil {
 		return 0, err
 	}
-	return writeChunk(w.w, c, c.ByteOrder.binary(), false)
+	return writeChunk(w.w, c, c.ByteOrder.binary(), false, 0, nil)
 }
 
 // StreamingWriter writes chunk trees that may hold StreamingSubChunk
@@ -75,88 +75,54 @@ func (w *StreamingWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
 
 	order := c.ByteOrder.binary()
 
-	n, err = writeChunk(w.w, c, order, true)
+	// the first pass writes the tree with placeholder sizes, recording for
+	// every chunk where its size field sits and how many bytes its body
+	// actually encoded to
+	var fixes []sizeFix
+	n, err = writeChunk(w.w, c, order, true, 0, &fixes)
 	if err != nil {
 		err = fmt.Errorf("writeChunk at first: %w", err)
 		return
 	}
 
-	// XXX: shared state for absolute seek position
-	posState := start
-
-	var chunkBodyRandomWriter func(b uint32) error
+	// the backfill rewrites the recorded facts and consults the tree no
+	// further, so nothing a Chunk implementation reports after the first pass
+	// can push a size field away from the bytes actually written
 	if ww, ok := w.w.(io.WriterAt); ok {
-		// io.WriterAt for optimize
-		chunkBodyRandomWriter = func(b uint32) error {
-			_, err := writeChunkBodySizeAt(ww, order, b, posState)
-			if err != nil {
-				return fmt.Errorf("writeChunkBodySizeAt: %w", err)
+		for _, fix := range fixes {
+			if _, err = writeChunkBodySizeAt(ww, order, fix.bodySize, start+fix.fieldOff); err != nil {
+				err = fmt.Errorf("writeChunkBodySizeAt: %w", err)
+				return
 			}
-
-			return nil
 		}
-	} else {
-		// revert seek position without masking an error from the backfill below
-		defer func() {
-			if _, seekErr := w.w.Seek(start+n, io.SeekStart); seekErr != nil && err == nil {
-				err = fmt.Errorf("seek: %w", seekErr)
-			}
-		}()
-
-		// random write by io.WriteSeeker
-		chunkBodyRandomWriter = func(b uint32) error {
-			_, err := w.w.Seek(posState, io.SeekStart)
-			if err != nil {
-				return fmt.Errorf("seek: %w", err)
-			}
-
-			_, err = writeChunkBodySize(w.w, order, b)
-			if err != nil {
-				return fmt.Errorf("writeChunkBodySizeAt: %w", err)
-			}
-
-			return nil
-		}
-	}
-
-	// write complete to re-write finally fixed body size
-	err = writeComplete(c, &posState, chunkBodyRandomWriter)
-	if err != nil {
-		err = fmt.Errorf("write complete: %w", err)
 		return
 	}
 
+	// revert the seek position without masking an error from the backfill below
+	defer func() {
+		if _, seekErr := w.w.Seek(start+n, io.SeekStart); seekErr != nil && err == nil {
+			err = fmt.Errorf("seek: %w", seekErr)
+		}
+	}()
+	for _, fix := range fixes {
+		if _, err = w.w.Seek(start+fix.fieldOff, io.SeekStart); err != nil {
+			err = fmt.Errorf("seek: %w", err)
+			return
+		}
+		if _, err = writeChunkBodySize(w.w, order, fix.bodySize); err != nil {
+			err = fmt.Errorf("writeChunkBodySize: %w", err)
+			return
+		}
+	}
 	return
 }
 
-func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
-	*pos += IDBytes
-	b, err := chunkBodySize(c)
-	if err != nil {
-		return err
-	}
-	err = f(b)
-	if err != nil {
-		return err
-	}
-	*pos += SizeBytes
-
-	switch cc := c.(type) {
-	case GroupedChunk:
-		*pos += TypeBytes
-		for _, p := range cc.Children() {
-			err := writeComplete(p, pos, f)
-			if err != nil {
-				return err
-			}
-		}
-	case SubChunk:
-		*pos += int64(b) + int64(b&1) // skip the padding byte after an odd-sized body
-	default:
-		return unsupportedChunkTypeError(c)
-	}
-
-	return nil
+// sizeFix records where a chunk's four-byte size field sits — relative to the
+// start of the tree being written — and the size its body actually encoded to.
+// The backfill rewrites these facts; it re-derives nothing from the tree.
+type sizeFix struct {
+	fieldOff int64
+	bodySize uint32
 }
 
 // validateTree checks, before a single byte is written, that the tree can be written as
@@ -229,7 +195,10 @@ func validateChunk(c Chunk, root, allowStreaming bool, depth int, streamed map[S
 
 var paddingByte = [1]byte{0x00}
 
-func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming bool) (n int64, err error) {
+// writeChunk writes one chunk at offset at, relative to the start of the tree
+// being written. With rec non-nil it appends a sizeFix for this chunk and every
+// chunk below it, recording the body sizes actually written.
+func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming bool, at int64, rec *[]sizeFix) (n int64, err error) {
 	n, err = writeChunkHeader(w, c, order)
 	if err != nil {
 		err = fmt.Errorf("chunk[%q] header: %w", c.ChunkID(), err)
@@ -237,7 +206,7 @@ func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming boo
 	}
 
 	var nn int64
-	nn, err = writeChunkBody(w, c, order, allowStreaming)
+	nn, err = writeChunkBody(w, c, order, allowStreaming, at+n, rec)
 	n += nn
 	if err != nil {
 		err = fmt.Errorf("chunk[%q] body: %w", c.ChunkID(), err)
@@ -257,6 +226,17 @@ func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming boo
 		}
 	}
 
+	if rec != nil {
+		body := nn
+		if _, ok := c.(GroupedChunk); ok {
+			// the group type went out with the header but counts into the size field
+			body += TypeBytes
+		}
+		if body > MaxBodySize {
+			return n, fmt.Errorf("%w: chunk[%q] body is %d bytes", ErrChunkTooLarge, c.ChunkID(), body)
+		}
+		*rec = append(*rec, sizeFix{fieldOff: at + IDBytes, bodySize: uint32(body)})
+	}
 	return
 }
 
@@ -321,12 +301,12 @@ func writeChunkBodySizeAt(w io.WriterAt, order binary.ByteOrder, b uint32, off i
 	return w.WriteAt(buf[:], off)
 }
 
-func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming bool) (n int64, err error) {
+func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming bool, at int64, rec *[]sizeFix) (n int64, err error) {
 	switch cc := c.(type) {
 	case GroupedChunk:
 		var nn int64
 		for i, p := range cc.Children() {
-			nn, err = writeChunk(w, p, order, allowStreaming)
+			nn, err = writeChunk(w, p, order, allowStreaming, at+n, rec)
 			n += nn
 			if err != nil {
 				err = fmt.Errorf("payload[%d]: %w", i, err)
