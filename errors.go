@@ -19,7 +19,9 @@ var (
 	// reader is revoked instead of misreading whatever comes next.
 	ErrRevokedBody = errors.New("riffbin: chunk body read after the iteration moved on")
 
-	// ErrChunkTooLarge is returned when a chunk body does not fit in the 32-bit RIFF size field.
+	// ErrChunkTooLarge is returned when a chunk body does not fit in the 32-bit RIFF
+	// size field. A streaming body triggers it the moment its tree outgrows the
+	// largest possible RIFF file, without draining the rest of the stream.
 	ErrChunkTooLarge = errors.New("riffbin: chunk too large")
 
 	// ErrSizeMismatch is returned when a chunk's BodySize disagrees with its actual

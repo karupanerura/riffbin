@@ -684,6 +684,34 @@ func TestWriterStopsCopyAtDeclaredSize(t *testing.T) {
 	})
 }
 
+// A streaming body has no declared size to cap its copy, but once the tree
+// outgrows the largest possible RIFF file, failure is inevitable: the write
+// must stop at that bound with ErrChunkTooLarge instead of draining the rest
+// of an endless stream. This test pushes ~4 GiB through the copy loop.
+func TestStreamingWriterStopsAtFileSizeBound(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("writes 4 GiB through the copy loop")
+	}
+
+	w, err := riffbin.NewStreamingWriter(&fakeSeeker{Writer: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), endlessReader{}),
+		},
+	})
+	if !errors.Is(err, riffbin.ErrChunkTooLarge) {
+		t.Errorf("should be ErrChunkTooLarge but got: %v", err)
+	}
+	if want := riffbin.HeaderBytes + riffbin.MaxBodySize; n != want {
+		t.Errorf("the write should stop at the file size bound: n = %d, want %d", n, want)
+	}
+}
+
 // sliceBackedSubChunk is a custom SubChunk whose concrete type is not
 // comparable — a value type holding slices.
 type sliceBackedSubChunk struct {

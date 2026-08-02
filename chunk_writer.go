@@ -78,10 +78,18 @@ func (w *StreamingWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
 
 	// the first pass writes the tree with placeholder sizes, recording for
 	// every chunk where its size field sits and how many bytes its body
-	// actually encoded to
+	// actually encoded to. It is capped at the largest file a RIFF chunk can
+	// be — the header plus a full 32-bit body: a streaming body has no
+	// declared size to bound its copy, but past this bound failure is
+	// inevitable, so the write stops right there instead of draining the
+	// rest of the stream.
 	var fixes []sizeFix
-	n, err = writeChunk(w.w, c, order, true, 0, &fixes)
+	n, err = writeChunk(&cappedWriter{w: w.w, remaining: HeaderBytes + MaxBodySize, sentinel: errFileBoundExceeded}, c, order, true, 0, &fixes)
 	if err != nil {
+		if errors.Is(err, errFileBoundExceeded) {
+			err = fmt.Errorf("%w: %w", ErrChunkTooLarge, err)
+			return
+		}
 		err = fmt.Errorf("writeChunk at first: %w", err)
 		return
 	}
@@ -374,9 +382,14 @@ func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming
 	return
 }
 
-// errDeclaredSizeExceeded is the sentinel a cappedWriter fails with when a
-// sub-chunk body runs past the size its header declared.
-var errDeclaredSizeExceeded = errors.New("declared body size exceeded")
+// errDeclaredSizeExceeded and errFileBoundExceeded are the sentinels the two
+// write caps fail with. They are distinct so a leaf overrunning its declared
+// size is told apart from a tree outgrowing the RIFF file bound — the caps
+// nest, and the copy loop cannot tell otherwise.
+var (
+	errDeclaredSizeExceeded = errors.New("declared body size exceeded")
+	errFileBoundExceeded    = errors.New("output crossed the RIFF file size bound")
+)
 
 // cappedWriter passes writes through until remaining bytes have gone out,
 // then stops accepting: the write that would cross the cap is truncated to

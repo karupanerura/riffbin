@@ -90,6 +90,8 @@
 // declares is only caught as it is copied, failing with [ErrSizeMismatch] where the
 // write stops — the header and part of the body are already emitted; the copy never
 // runs past the declared size, so even an endless body fails right at that boundary.
+// A streaming body, which has no declared size, is capped where its tree outgrows
+// the largest possible RIFF file, failing with [ErrChunkTooLarge] as it streams.
 //
 // # Byte order
 //
