@@ -116,12 +116,20 @@ func Chunks(r io.Reader, opts ...ReaderOption) iter.Seq2[ChunkInfo, error] {
 		limit := int64(-1)
 		pr, _ := r.(ReadSeekerAt)
 		if pr != nil {
-			if _, err := pr.Seek(0, io.SeekCurrent); err != nil {
+			if origin, err := pr.Seek(0, io.SeekCurrent); err != nil {
 				// the type can seek but the stream cannot: read bodies through
 				pr = nil
 			} else if _, limit, err = measure(pr); err != nil {
-				yield(ChunkInfo{}, err)
-				return
+				// the stream seeks but cannot be measured — no SeekEnd, say.
+				// seeking is only an optimization here, so it must not reject
+				// input the plain reader path parses: restore the position
+				// and read through
+				if _, rerr := pr.Seek(origin, io.SeekStart); rerr != nil {
+					// the position is unknowable now; reading on would misparse
+					yield(ChunkInfo{}, err)
+					return
+				}
+				pr, limit = nil, -1
 			}
 		}
 		scan(r, pr, limit, opts, yield)

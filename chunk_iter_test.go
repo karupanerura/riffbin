@@ -110,6 +110,36 @@ func (pipeLikeReader) Seek(int64, int) (int64, error) {
 	return 0, errors.New("illegal seek")
 }
 
+// seekerWithoutEnd seeks from the start and the current position but cannot
+// be measured: SeekEnd fails, like a forward-only wrapper.
+type seekerWithoutEnd struct{ *bytes.Reader }
+
+func (r seekerWithoutEnd) Seek(offset int64, whence int) (int64, error) {
+	if whence == io.SeekEnd {
+		return 0, errors.New("SeekEnd unsupported")
+	}
+	return r.Reader.Seek(offset, whence)
+}
+
+// Seeking is only an optimization for Chunks: a source that seeks but cannot
+// be measured must be read through, not rejected — the same bytes parse when
+// the value is handed over as a plain io.Reader.
+func TestChunksReadsThroughWhenMeasureFails(t *testing.T) {
+	t.Parallel()
+
+	expected, err := collectChunks(t, onlyReader{bytes.NewReader(paddedFileBytes)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := collectChunks(t, seekerWithoutEnd{bytes.NewReader(paddedFileBytes)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if df := cmp.Diff(expected, got); df != "" {
+		t.Errorf("diff = %s", df)
+	}
+}
+
 // A source that satisfies ReadSeekerAt by type but cannot actually seek must be
 // read through, not fail before the first byte — Chunks(os.Stdin) on a pipe.
 func TestChunksReadsThroughWhenSeekingFails(t *testing.T) {
