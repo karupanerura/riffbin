@@ -106,6 +106,327 @@ func TestWriterTrustsMeasuredBytesOverClaimedCount(t *testing.T) {
 	}
 }
 
+// encodedSize is the byte length a group body encodes to: the group type plus
+// every child with its header and its word-alignment pad byte.
+func encodedSize(children []riffbin.Chunk) int64 {
+	size := int64(riffbin.TypeBytes)
+	for _, c := range children {
+		b := c.BodySize()
+		size += riffbin.HeaderBytes + b + (b & 1)
+	}
+	return size
+}
+
+// mutatingGroupChunk hands out first on the first Children call and whatever
+// later returns afterwards — the shape of a lazily regenerated or racily
+// mutated tree.
+type mutatingGroupChunk struct {
+	id            riffbin.FourCC
+	groupType     riffbin.FourCC
+	first         []riffbin.Chunk
+	later         func() []riffbin.Chunk
+	childrenCalls int
+}
+
+func (c *mutatingGroupChunk) ChunkID() riffbin.FourCC { return c.id }
+
+func (c *mutatingGroupChunk) GroupType() riffbin.FourCC { return c.groupType }
+
+func (c *mutatingGroupChunk) BodySize() int64 { return encodedSize(c.first) }
+
+func (c *mutatingGroupChunk) Children() []riffbin.Chunk {
+	c.childrenCalls++
+	if c.childrenCalls == 1 {
+		return c.first
+	}
+	return c.later()
+}
+
+// The write works on a snapshot taken before the first byte goes out, so a
+// Children that answers differently on a second call — here with the group
+// itself, which would recurse forever — is never asked again: the tree the
+// snapshot saw is the tree the file holds.
+func TestWriterSnapshotsChildrenBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	build := func() (*mutatingGroupChunk, *riffbin.RIFFChunk) {
+		group := &mutatingGroupChunk{
+			id:        riffbin.MustParseFourCC("LIST"),
+			groupType: riffbin.MustParseFourCC("TSTL"),
+			first: []riffbin.Chunk{
+				&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("abc")},
+			},
+		}
+		group.later = func() []riffbin.Chunk { return []riffbin.Chunk{group} }
+		return group, &riffbin.RIFFChunk{
+			FormType: riffbin.MustParseFourCC("TEST"),
+			Payload:  []riffbin.Chunk{group},
+		}
+	}
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&riffbin.ListChunk{
+				ListType: riffbin.MustParseFourCC("TSTL"),
+				Payload: []riffbin.Chunk{
+					&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("abc")},
+				},
+			},
+		},
+	})
+
+	group, tree := build()
+	var buf bytes.Buffer
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(tree); err != nil {
+		t.Fatalf("Writer: %v", err)
+	}
+	if group.childrenCalls != 1 {
+		t.Errorf("Writer read Children %d times, want exactly once", group.childrenCalls)
+	}
+	got, err := riffbin.ReadAll(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Writer output does not parse: %v", err)
+	}
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("Writer: diff = %s", df)
+	}
+
+	group, tree = build()
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.WriteChunk(tree); err != nil {
+		t.Fatalf("StreamingWriter: %v", err)
+	}
+	if group.childrenCalls != 1 {
+		t.Errorf("StreamingWriter read Children %d times, want exactly once", group.childrenCalls)
+	}
+	got, err = riffbin.ReadAll(bytes.NewReader(m.buf))
+	if err != nil {
+		t.Fatalf("StreamingWriter output does not parse: %v", err)
+	}
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("StreamingWriter: diff = %s", df)
+	}
+}
+
+// mutatingIDSubChunk answers its first ChunkID call with plan and any further
+// call with later; its size and body stay stable.
+type mutatingIDSubChunk struct {
+	plan, later riffbin.FourCC
+	payload     string
+	idCalls     int
+}
+
+func (c *mutatingIDSubChunk) ChunkID() riffbin.FourCC {
+	c.idCalls++
+	if c.idCalls == 1 {
+		return c.plan
+	}
+	return c.later
+}
+
+func (c *mutatingIDSubChunk) BodySize() int64 { return int64(len(c.payload)) }
+
+func (c *mutatingIDSubChunk) Body() io.Reader { return strings.NewReader(c.payload) }
+
+// The header carries the ID the snapshot read, exactly once: a later answer —
+// here a structural ID, which would misparse the file — never reaches the
+// output, because nothing asks again.
+func TestWriterSnapshotsChunkIDBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	leaf := &mutatingIDSubChunk{
+		plan:    riffbin.MustParseFourCC("DAT1"),
+		later:   riffbin.MustParseFourCC("LIST"),
+		payload: "wxyz",
+	}
+	var buf bytes.Buffer
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{leaf},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if leaf.idCalls != 1 {
+		t.Errorf("read ChunkID %d time(s), want exactly once", leaf.idCalls)
+	}
+
+	got, err := riffbin.ReadAll(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("the written file does not parse: %v", err)
+	}
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("wxyz")},
+		},
+	})
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("diff = %s", df)
+	}
+}
+
+// A size mutated while the snapshot is still being taken cannot slip through
+// either: the root's own report re-derives its children's sizes, so the two
+// plan-time reads disagree and the write is refused before its first byte.
+func TestWriterRejectsMidPlanSizeMutation(t *testing.T) {
+	t.Parallel()
+
+	sized := &sizeOnlyMutatingSubChunk{id: riffbin.MustParseFourCC("DAT1"), planned: 4, body: "wx", planReads: 1}
+	var buf bytes.Buffer
+	n, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{sized},
+	})
+	if !errors.Is(err, riffbin.ErrSizeMismatch) {
+		t.Errorf("should be ErrSizeMismatch but got: %v", err)
+	}
+	if n != 0 || buf.Len() != 0 {
+		t.Errorf("wrote %d byte(s) before failing", buf.Len())
+	}
+}
+
+// A body producing a different number of bytes than the snapshot planned
+// fails at that size, whatever BodySize answers once the snapshot is done:
+// the header already carries the planned size, so the plan is what the body
+// is held to.
+func TestWriterHoldsBodyToSnapshottedSize(t *testing.T) {
+	t.Parallel()
+
+	// the snapshot reads the size twice — once at the leaf, once inside the
+	// root's own report — so the mutation here lands after planning is over
+	sized := &sizeOnlyMutatingSubChunk{id: riffbin.MustParseFourCC("DAT1"), planned: 4, body: "wx", planReads: 2}
+	var buf bytes.Buffer
+	_, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{sized},
+	})
+	if !errors.Is(err, riffbin.ErrSizeMismatch) {
+		t.Errorf("should be ErrSizeMismatch but got: %v", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "declares 4 bytes but produced 2") {
+		t.Errorf("the error should hold the body to the snapshotted 4 bytes: %v", err)
+	}
+}
+
+// sizeOnlyMutatingSubChunk reports planned from its first planReads BodySize
+// calls and the actual body length afterwards.
+type sizeOnlyMutatingSubChunk struct {
+	id        riffbin.FourCC
+	planned   int64
+	body      string
+	planReads int
+	calls     int
+}
+
+func (c *sizeOnlyMutatingSubChunk) ChunkID() riffbin.FourCC { return c.id }
+
+func (c *sizeOnlyMutatingSubChunk) BodySize() int64 {
+	c.calls++
+	if c.calls <= c.planReads {
+		return c.planned
+	}
+	return int64(len(c.body))
+}
+
+func (c *sizeOnlyMutatingSubChunk) Body() io.Reader { return strings.NewReader(c.body) }
+
+// sideEffectSubChunk runs effect when its body is requested — the only
+// moment the write pass calls back into caller code.
+type sideEffectSubChunk struct {
+	id      riffbin.FourCC
+	payload string
+	effect  func()
+}
+
+func (c *sideEffectSubChunk) ChunkID() riffbin.FourCC { return c.id }
+
+func (c *sideEffectSubChunk) BodySize() int64 { return int64(len(c.payload)) }
+
+func (c *sideEffectSubChunk) Body() io.Reader {
+	c.effect()
+	return strings.NewReader(c.payload)
+}
+
+// swappableStreamingChunk embeds a *StreamingSubChunk that the test swaps
+// mid-write: the stream captured at plan time must be the one drained, or
+// the duplicate and consumed checks would have judged a different stream
+// than the write uses.
+type swappableStreamingChunk struct {
+	*riffbin.StreamingSubChunk
+}
+
+// The plan captures the streaming body itself, so an embedder swapping its
+// embedded chunk between planning and writing changes nothing: the stream
+// the checks saw is the stream the write drains, and the replacement stays
+// fresh for a later write.
+func TestStreamingWriterDrainsStreamCapturedAtPlanTime(t *testing.T) {
+	t.Parallel()
+
+	original := riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT2"), strings.NewReader("original"))
+	replacement := riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT2"), strings.NewReader("replacement"))
+	swapper := &swappableStreamingChunk{StreamingSubChunk: original}
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&sideEffectSubChunk{id: riffbin.MustParseFourCC("ENT1"), payload: "xx", effect: func() {
+				swapper.StreamingSubChunk = replacement
+			}},
+			swapper,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := riffbin.ReadAll(bytes.NewReader(m.buf))
+	if err != nil {
+		t.Fatalf("the written file does not parse: %v", err)
+	}
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT1"), Payload: []byte("xx")},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT2"), Payload: []byte("original")},
+		},
+	})
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("diff = %s", df)
+	}
+	if got := replacement.BodySize(); got != 0 {
+		t.Errorf("the replacement stream was consumed: BodySize() = %d, want 0", got)
+	}
+}
+
+// A group whose planned children do not fit the 32-bit size field fails
+// before a single byte is written, even though every child fits on its own.
+func TestWriterRejectsOversizedGroupSumBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	n, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&oversizedSubChunk{id: riffbin.MustParseFourCC("ENT1"), size: 3 << 30},
+			&oversizedSubChunk{id: riffbin.MustParseFourCC("ENT2"), size: 3 << 30},
+		},
+	})
+	if !errors.Is(err, riffbin.ErrChunkTooLarge) {
+		t.Errorf("should be ErrChunkTooLarge but got: %v", err)
+	}
+	if n != 0 || buf.Len() != 0 {
+		t.Errorf("wrote %d byte(s) before failing", buf.Len())
+	}
+}
+
 // A streaming chunk is sized from the bytes its stream delivers, so a stream
 // whose WriteTo misreports its count must not shift the size fields or the
 // offsets they are backfilled at: the chunk after it stays intact.

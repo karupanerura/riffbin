@@ -93,6 +93,17 @@
 // A streaming body, which has no declared size, is capped where its tree outgrows
 // the largest possible RIFF file, failing with [ErrChunkTooLarge] as it streams.
 //
+// Each WriteChunk call reads the tree exactly once: the check above snapshots
+// every ChunkID, GroupType, Children and BodySize, and the write pass works
+// from the snapshot alone, calling back into the tree only for [SubChunk.Body]
+// on each non-streaming leaf — a copy bounded by the snapshotted size — and to
+// drain the streaming bodies captured with it. Sizes and offsets are measured
+// on the destination side of every copy. A method answering differently once
+// planning is over, or a body's WriteTo misreporting its count, therefore
+// cannot desynchronize the size fields from the bytes actually written or
+// drive the writers into unbounded recursion; a panic raised inside the
+// implementation's own methods still propagates.
+//
 // # Byte order
 //
 // Setting [RIFFChunk.ByteOrder] to [BigEndian] selects RIFX, the big-endian variant
