@@ -363,9 +363,14 @@ func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming
 		// the header already went out with the declared size, so a byte past it
 		// is a defect no matter what follows: the copy is capped right there —
 		// an endless body cannot flood the output — and a short body is caught
-		// just after; either way the write stops rather than emit a corrupt file
+		// just after; either way the write stops rather than emit a corrupt file.
+		// io.Copy's count is discarded: it is whatever the body's own WriteTo
+		// returned, and a claim there must not move offsets or verdicts — the
+		// bytes the cap actually let through are what count
 		want := int64(declared)
-		n, err = io.Copy(&cappedWriter{w: w, remaining: want, sentinel: errDeclaredSizeExceeded}, cc.Body())
+		cw := &cappedWriter{w: w, remaining: want, sentinel: errDeclaredSizeExceeded}
+		_, err = io.Copy(cw, cc.Body())
+		n = want - cw.remaining
 		if err != nil {
 			if errors.Is(err, errDeclaredSizeExceeded) {
 				err = fmt.Errorf("%w: chunk[%q] declares %d byte(s) but its body produced more", ErrSizeMismatch, cc.ChunkID(), want)
@@ -390,6 +395,21 @@ var (
 	errDeclaredSizeExceeded = errors.New("declared body size exceeded")
 	errFileBoundExceeded    = errors.New("output crossed the RIFF file size bound")
 )
+
+// countingWriter counts the bytes its underlying writer accepted. It is the
+// measurement the writers trust: io.Copy hands the copy to the source's own
+// WriteTo when it has one, and the count that call returns is the source's
+// claim — the bytes that actually passed through here are not.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n += int64(n)
+	return n, err
+}
 
 // cappedWriter passes writes through until remaining bytes have gone out,
 // then stops accepting: the write that would cross the cap is truncated to

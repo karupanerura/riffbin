@@ -234,9 +234,14 @@ func (c *streamingChunkBody) Read(p []byte) (n int, err error) {
 
 func (c *streamingChunkBody) WriteTo(w io.Writer) (n int64, err error) {
 	c.consumed = true
-	n, err = io.Copy(w, c.reader)
-	c.readLength += n
-	return
+	// count at the destination: io.Copy hands the copy to the reader's own
+	// WriteTo when it has one, and the count that call returns is its claim.
+	// readLength sizes the chunk in the output, so it holds the bytes that
+	// actually arrived, whatever the reader reported
+	cw := countingWriter{w: w}
+	_, err = io.Copy(&cw, c.reader)
+	c.readLength += cw.n
+	return cw.n, err
 }
 
 // SectionSubChunk is a sub-chunk whose payload is a section of a seekable stream,
