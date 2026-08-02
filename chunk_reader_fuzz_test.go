@@ -74,6 +74,9 @@ var fuzzSeeds = [][]byte{
 	// unsupported containers
 	{'R', 'F', '6', '4', 0x04, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E'},
 	{'B', 'W', '6', '4', 0x04, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E'},
+	// an unpadded file that the garbage-padding policy reads as a different,
+	// complete tree (TestOmittedPadIsAmbiguous)
+	ambiguousUnpaddedFile,
 }
 
 // checkRoundTrip verifies that a tree that could be read is also writable, and that

@@ -115,7 +115,8 @@ func TestReadAllPadding(t *testing.T) {
 		})
 		t.Run("AllowGarbagePadding", func(t *testing.T) {
 			// the garbage policy skips the byte at the pad position, which here
-			// heads the next chunk header: the omission stays an error under it
+			// heads the next chunk header: this omission stays an error — see
+			// TestOmittedPadIsAmbiguous for one that reads as a different tree
 			t.Parallel()
 			if _, err := riffbin.ReadAll(bytes.NewReader(legacy), riffbin.AllowGarbagePadding()); !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("should be ErrInvalidFormat but got: %v", err)
@@ -457,6 +458,17 @@ func TestReadAllPadding(t *testing.T) {
 	})
 }
 
+// payloadShape renders the root's immediate children as "ID[size]" strings —
+// the coarse shape the ambiguity tests below compare.
+func payloadShape(t *testing.T, c *riffbin.RIFFChunk) []string {
+	t.Helper()
+	var out []string
+	for _, p := range c.Payload {
+		out = append(out, fmt.Sprintf("%s[%d]", p.ChunkID(), p.BodySize()))
+	}
+	return out
+}
+
 // A valid padded file except that ODD1's pad byte holds printable 'A' — the
 // adversarial shape where the omitted-padding and the garbage-padding reading
 // both form complete trees. The garbage policy reads the real chunks. The
@@ -480,15 +492,6 @@ func TestPrintableGarbagePadIsAmbiguous(t *testing.T) {
 	}
 	b = append(b, bytes.Repeat([]byte{'D'}, 40)...)
 
-	shape := func(t *testing.T, c *riffbin.RIFFChunk) []string {
-		t.Helper()
-		var out []string
-		for _, p := range c.Payload {
-			out = append(out, fmt.Sprintf("%s[%d]", p.ChunkID(), p.BodySize()))
-		}
-		return out
-	}
-
 	t.Run("Strict", func(t *testing.T) {
 		t.Parallel()
 		if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
@@ -501,7 +504,7 @@ func TestPrintableGarbagePadIsAmbiguous(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if df := cmp.Diff([]string{"ODD1[1]", "ENT1[0]", "DATA[40]"}, shape(t, got)); df != "" {
+		if df := cmp.Diff([]string{"ODD1[1]", "ENT1[0]", "DATA[40]"}, payloadShape(t, got)); df != "" {
 			t.Errorf("diff = %s", df)
 		}
 	})
@@ -512,7 +515,61 @@ func TestPrintableGarbagePadIsAmbiguous(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if df := cmp.Diff([]string{"ODD1[1]", "AENT[49]"}, shape(t, got)); df != "" {
+		if df := cmp.Diff([]string{"ODD1[1]", "AENT[49]"}, payloadShape(t, got)); df != "" {
+			t.Errorf("diff = %s", df)
+		}
+	})
+}
+
+// ambiguousUnpaddedFile is a valid unpadded file whose bytes also form a
+// complete tree when the pad-position byte is skipped as garbage padding.
+// It is also a fuzz seed: FuzzReadersAgree keeps the readers agreeing on it.
+var ambiguousUnpaddedFile = append([]byte{
+	'R', 'I', 'F', 'F', 86, 0x00, 0x00, 0x00, // body size (4 + 8+1 + 8+65, no pad bytes counted)
+	'T', 'E', 'S', 'T',
+	'O', 'D', 'D', '1', 0x01, 0x00, 0x00, 0x00, 'x', // odd body, its pad byte omitted
+	'A', 'B', 'C', 'D', 0x41, 0x00, 0x00, 0x00, // the true next chunk, a 65 byte body:
+	0x00,                                       // body[0] — the phantom "BCDA"'s fourth size byte, which must be zero
+	'D', 'A', 'T', 'A', 0x38, 0x00, 0x00, 0x00, // body[1..8] — a phantom header that eats the rest
+}, bytes.Repeat([]byte{'D'}, 56)...) // body[9..64]
+
+// The mirror image of the ambiguity above: this time the file's actual
+// deviation is the omitted pad byte, and it is the garbage policy that
+// misreads. That policy skips the 'A' heading the true "ABCD" header as if
+// it were a pad byte, and the shifted bytes happen to keep parsing — the
+// phantom "BCDA" borrows the 0x41 of the size 65 as its fourth character,
+// reads its size zero from body[0], and the phantom "DATA" header inside the
+// true body swallows the rest exactly to the end of the root chunk. Neither
+// policy is fail-closed against the other's deviation; each is deterministic
+// only for the one it declares.
+func TestOmittedPadIsAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Strict", func(t *testing.T) {
+		t.Parallel()
+		if _, err := riffbin.ReadAll(bytes.NewReader(ambiguousUnpaddedFile)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			t.Errorf("should be ErrInvalidFormat but got: %v", err)
+		}
+	})
+	t.Run("AllowOmittedPadding", func(t *testing.T) {
+		t.Parallel()
+		got, err := riffbin.ReadAll(bytes.NewReader(ambiguousUnpaddedFile), riffbin.AllowOmittedPadding())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if df := cmp.Diff([]string{"ODD1[1]", "ABCD[65]"}, payloadShape(t, got)); df != "" {
+			t.Errorf("diff = %s", df)
+		}
+	})
+	t.Run("AllowGarbagePadding", func(t *testing.T) {
+		// the documented sharp edge: declared as garbage-padded, the unpadded
+		// file reads as a different tree
+		t.Parallel()
+		got, err := riffbin.ReadAll(bytes.NewReader(ambiguousUnpaddedFile), riffbin.AllowGarbagePadding())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if df := cmp.Diff([]string{"ODD1[1]", "BCDA[0]", "DATA[56]"}, payloadShape(t, got)); df != "" {
 			t.Errorf("diff = %s", df)
 		}
 	})

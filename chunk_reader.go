@@ -54,10 +54,11 @@ func AllowOmittedPadding() ReaderOption {
 // AllowGarbagePadding reads files whose pad bytes hold garbage instead of the
 // zero the specification requires: the byte at a pad position is skipped
 // without inspecting its value, as the reference readers do (x/image/riff,
-// ffmpeg, libwebp). A file that omits pad bytes still fails under it — the
-// skip would eat the first byte of the next chunk header — so combining it
-// with AllowOmittedPadding, which resolves the same byte the other way, is
-// ErrConflictingOptions.
+// ffmpeg, libwebp). On a file that omits pad bytes the skip eats the first
+// byte of the next chunk header instead — usually an error, but the shifted
+// bytes can also read as a different, complete tree — declare only the
+// deviation the input actually has. Combining it with AllowOmittedPadding,
+// which resolves the same byte the other way, is ErrConflictingOptions.
 func AllowGarbagePadding() ReaderOption {
 	return readerOptionFunc(func(c *readerConfig) { c.allowGarbagePadding = true })
 }
