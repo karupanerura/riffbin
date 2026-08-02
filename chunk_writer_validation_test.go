@@ -625,6 +625,65 @@ func TestStreamingWriterRejectsConsumedEmptyChunk(t *testing.T) {
 	}
 }
 
+// endlessReader yields bytes forever.
+type endlessReader struct{}
+
+func (endlessReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'z'
+	}
+	return len(p), nil
+}
+
+// overrunningSubChunk declares a single byte but its body never ends — a
+// broken custom SubChunk implementation.
+type overrunningSubChunk struct{}
+
+func (overrunningSubChunk) ChunkID() riffbin.FourCC { return riffbin.MustParseFourCC("OVER") }
+func (overrunningSubChunk) BodySize() int64         { return 1 }
+func (overrunningSubChunk) Body() io.Reader         { return endlessReader{} }
+
+// A body is copied only up to the size its header declared: a byte past it is
+// a defect no matter what follows, so an endless body fails with
+// ErrSizeMismatch at the boundary instead of flooding the output.
+func TestWriterStopsCopyAtDeclaredSize(t *testing.T) {
+	t.Parallel()
+
+	tree := &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{overrunningSubChunk{}},
+	}
+	// the root header and group type, the sub-chunk header, and the declared single byte
+	const want = riffbin.HeaderBytes + riffbin.TypeBytes + riffbin.HeaderBytes + 1
+
+	t.Run("Writer", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		n, err := riffbin.NewWriter(&buf).WriteChunk(tree)
+		if !errors.Is(err, riffbin.ErrSizeMismatch) {
+			t.Errorf("should be ErrSizeMismatch but got: %v", err)
+		}
+		if n != want || buf.Len() != want {
+			t.Errorf("the copy should stop at the declared size: n = %d, wrote %d byte(s), want %d", n, buf.Len(), want)
+		}
+	})
+	t.Run("StreamingWriter", func(t *testing.T) {
+		t.Parallel()
+		m := &memWriteSeeker{}
+		w, err := riffbin.NewStreamingWriter(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := w.WriteChunk(tree)
+		if !errors.Is(err, riffbin.ErrSizeMismatch) {
+			t.Errorf("should be ErrSizeMismatch but got: %v", err)
+		}
+		if n != want || len(m.buf) != want {
+			t.Errorf("the copy should stop at the declared size: n = %d, wrote %d byte(s), want %d", n, len(m.buf), want)
+		}
+	})
+}
+
 // sliceBackedSubChunk is a custom SubChunk whose concrete type is not
 // comparable — a value type holding slices.
 type sliceBackedSubChunk struct {

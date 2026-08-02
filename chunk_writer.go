@@ -2,6 +2,7 @@ package riffbin
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -212,14 +213,30 @@ var paddingByte = [1]byte{0x00}
 // being written. With rec non-nil it appends a sizeFix for this chunk and every
 // chunk below it, recording the body sizes actually written.
 func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming bool, at int64, rec *[]sizeFix) (n int64, err error) {
-	n, err = writeChunkHeader(w, c, order)
+	// the declared size is read once and used twice — written into the header,
+	// then bounding the body copy — so the body is verified against the very
+	// number the header carries, whatever BodySize returns in between. A
+	// streaming chunk goes out with a zero placeholder instead: its size is
+	// known only once its stream is drained, and the backfill rewrites the
+	// field from the bytes actually written (a group enclosing one declares
+	// the sizes its children report so far — also placeholders, also
+	// rewritten).
+	var declared uint32
+	if _, ok := c.(streamer); !ok {
+		declared, err = chunkBodySize(c)
+		if err != nil {
+			return
+		}
+	}
+
+	n, err = writeChunkHeader(w, c, order, declared)
 	if err != nil {
 		err = fmt.Errorf("chunk[%q] header: %w", c.ChunkID(), err)
 		return
 	}
 
 	var nn int64
-	nn, err = writeChunkBody(w, c, order, allowStreaming, at+n, rec)
+	nn, err = writeChunkBody(w, c, order, allowStreaming, declared, at+n, rec)
 	n += nn
 	if err != nil {
 		err = fmt.Errorf("chunk[%q] body: %w", c.ChunkID(), err)
@@ -253,19 +270,7 @@ func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming boo
 	return
 }
 
-func writeChunkHeader(w io.Writer, c Chunk, order binary.ByteOrder) (n int64, err error) {
-	// a streaming chunk's size is known only once its stream is drained: its
-	// size field goes out as a zero placeholder and the backfill rewrites it
-	// from the bytes actually written. A group enclosing one declares the
-	// sizes its children report so far — also a placeholder, also rewritten.
-	var b uint32
-	if _, ok := c.(streamer); !ok {
-		b, err = chunkBodySize(c)
-		if err != nil {
-			return
-		}
-	}
-
+func writeChunkHeader(w io.Writer, c Chunk, order binary.ByteOrder, declared uint32) (n int64, err error) {
 	var nn int
 	id := c.ChunkID()
 	nn, err = w.Write(id[:])
@@ -275,7 +280,7 @@ func writeChunkHeader(w io.Writer, c Chunk, order binary.ByteOrder) (n int64, er
 		return
 	}
 
-	nn, err = writeChunkBodySize(w, order, b)
+	nn, err = writeChunkBodySize(w, order, declared)
 	n += int64(nn)
 	if err != nil {
 		err = fmt.Errorf("size: %w", err)
@@ -320,7 +325,7 @@ func writeChunkBodySizeAt(w io.WriterAt, order binary.ByteOrder, b uint32, off i
 	return w.WriteAt(buf[:], off)
 }
 
-func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming bool, at int64, rec *[]sizeFix) (n int64, err error) {
+func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming bool, declared uint32, at int64, rec *[]sizeFix) (n int64, err error) {
 	switch cc := c.(type) {
 	case GroupedChunk:
 		var nn int64
@@ -347,14 +352,19 @@ func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming
 			return
 		}
 
-		want := cc.BodySize()
-		n, err = io.Copy(w, cc.Body())
+		// the header already went out with the declared size, so a byte past it
+		// is a defect no matter what follows: the copy is capped right there —
+		// an endless body cannot flood the output — and a short body is caught
+		// just after; either way the write stops rather than emit a corrupt file
+		want := int64(declared)
+		n, err = io.Copy(&cappedWriter{w: w, remaining: want, sentinel: errDeclaredSizeExceeded}, cc.Body())
 		if err != nil {
+			if errors.Is(err, errDeclaredSizeExceeded) {
+				err = fmt.Errorf("%w: chunk[%q] declares %d byte(s) but its body produced more", ErrSizeMismatch, cc.ChunkID(), want)
+			}
 			return
 		}
 		if n != want {
-			// the header has already been written with the declared size, so carrying on
-			// would emit a corrupt file
 			err = fmt.Errorf("%w: chunk[%q] declares %d bytes but produced %d", ErrSizeMismatch, cc.ChunkID(), want, n)
 			return
 		}
@@ -362,6 +372,40 @@ func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming
 		err = unsupportedChunkTypeError(c)
 	}
 	return
+}
+
+// errDeclaredSizeExceeded is the sentinel a cappedWriter fails with when a
+// sub-chunk body runs past the size its header declared.
+var errDeclaredSizeExceeded = errors.New("declared body size exceeded")
+
+// cappedWriter passes writes through until remaining bytes have gone out,
+// then stops accepting: the write that would cross the cap is truncated to
+// it and fails with the sentinel its creator chose. A source staying within
+// the cap never notices — io.Copy keeps its WriteTo fast path — and one
+// producing more is cut off at the boundary instead of being drained.
+type cappedWriter struct {
+	w         io.Writer
+	remaining int64
+	sentinel  error
+}
+
+func (cw *cappedWriter) Write(p []byte) (int, error) {
+	over := int64(len(p)) > cw.remaining
+	if over {
+		p = p[:cw.remaining]
+	}
+	var n int
+	var err error
+	if len(p) > 0 {
+		n, err = cw.w.Write(p)
+		cw.remaining -= int64(n)
+	}
+	if err == nil && over {
+		// an error of the underlying writer takes precedence: the sentinel
+		// only reports that the source outgrew the cap
+		err = cw.sentinel
+	}
+	return n, err
 }
 
 func unsupportedChunkTypeError(c Chunk) error {

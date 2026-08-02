@@ -26,7 +26,8 @@ var (
 	// encoding: a sub-chunk producing a different number of bytes than it declares,
 	// or a grouped chunk reporting a size other than what its type and children
 	// encode to. A mismatch found mid-write stops there rather than completing a
-	// corrupt file; the bytes already written remain in the output.
+	// corrupt file — a body is never copied past the size its header declared —
+	// and the bytes already written remain in the output.
 	ErrSizeMismatch = errors.New("riffbin: chunk body size mismatch")
 
 	// ErrUnsupportedChunkType is returned when a Chunk implements neither GroupedChunk nor SubChunk.

@@ -88,7 +88,8 @@
 // children encode to fails with [ErrSizeMismatch], one above 4 GiB with
 // [ErrChunkTooLarge]. A body that produces a different number of bytes than it
 // declares is only caught as it is copied, failing with [ErrSizeMismatch] where the
-// write stops — the header and part of the body are already emitted.
+// write stops — the header and part of the body are already emitted; the copy never
+// runs past the declared size, so even an endless body fails right at that boundary.
 //
 // # Byte order
 //
