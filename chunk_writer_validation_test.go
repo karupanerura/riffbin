@@ -371,6 +371,55 @@ func TestStreamingWriterEmptyBody(t *testing.T) {
 	}
 }
 
+// misreportingList reports a body size that ignores its children — a broken
+// custom GroupedChunk implementation.
+type misreportingList struct {
+	children []riffbin.Chunk
+}
+
+func (c *misreportingList) ChunkID() riffbin.FourCC   { return riffbin.MustParseFourCC("LIST") }
+func (c *misreportingList) BodySize() int64           { return riffbin.TypeBytes }
+func (c *misreportingList) GroupType() riffbin.FourCC { return riffbin.MustParseFourCC("LST1") }
+func (c *misreportingList) Children() []riffbin.Chunk { return c.children }
+
+// A grouped chunk whose BodySize is not what its type and children encode to
+// would write a header the readers cannot reconcile with the bytes that
+// follow; the tree is rejected before the first byte.
+func TestWriterRejectsMisreportedGroupSize(t *testing.T) {
+	t.Parallel()
+
+	tree := func() *riffbin.RIFFChunk {
+		return &riffbin.RIFFChunk{
+			FormType: riffbin.MustParseFourCC("TEST"),
+			Payload: []riffbin.Chunk{&misreportingList{children: []riffbin.Chunk{
+				&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DATA"), Payload: []byte("wxyz")},
+			}}},
+		}
+	}
+
+	var buf bytes.Buffer
+	n, err := riffbin.NewWriter(&buf).WriteChunk(tree())
+	if !errors.Is(err, riffbin.ErrSizeMismatch) {
+		t.Errorf("Writer: should be ErrSizeMismatch but got: %v", err)
+	}
+	if n != 0 || buf.Len() != 0 {
+		t.Errorf("Writer: wrote %d byte(s) before failing", buf.Len())
+	}
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err = w.WriteChunk(tree())
+	if !errors.Is(err, riffbin.ErrSizeMismatch) {
+		t.Errorf("StreamingWriter: should be ErrSizeMismatch but got: %v", err)
+	}
+	if n != 0 || len(m.buf) != 0 {
+		t.Errorf("StreamingWriter: wrote %d byte(s) before failing", len(m.buf))
+	}
+}
+
 // The same streaming sub-chunk placed twice in one tree would drain its stream
 // at the first occurrence and write a lying header at the second; the tree is
 // rejected before the first byte, like every defect that is checkable up front.

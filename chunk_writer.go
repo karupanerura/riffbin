@@ -163,6 +163,11 @@ func validateChunk(c Chunk, root, allowStreaming bool, depth int, streamed map[S
 				return err
 			}
 		}
+		// children first: computing their encoded size recurses through them,
+		// which the loop above has just depth-bounded and validated
+		if want, got := groupBodySize(cc.Children()), cc.BodySize(); got != want {
+			return fmt.Errorf("%w: chunk[%q] reports a %d byte body but its group type and children encode to %d byte(s)", ErrSizeMismatch, id, got, want)
+		}
 	case SubChunk:
 		switch id {
 		case riffID, rifxID, listID:

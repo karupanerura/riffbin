@@ -76,10 +76,13 @@
 // structural ID such as "LIST", a nested RIFF chunk or nesting too deep to read back
 // fails with [ErrUnwritableChunk], and a streaming sub-chunk whose stream was already
 // consumed — or one placed twice in the tree, which would find it consumed — fails
-// with [ErrConsumedStreamingChunk]. Sizes the tree misdeclares fail
-// with [ErrChunkTooLarge] up front; a body that produces a different number of bytes
-// than it declares is only caught as it is copied, failing with [ErrSizeMismatch]
-// where the write stops — the header and part of the body are already emitted.
+// with [ErrConsumedStreamingChunk]. Sizes the tree misdeclares fail up front where
+// they are checkable: a grouped chunk reporting anything but what its type and
+// children encode to fails with [ErrSizeMismatch], one above 4 GiB with
+// [ErrChunkTooLarge]. A body that produces a different number of bytes than it
+// declares — or, once a stream is drained, than it reports — is only caught as it
+// is copied, failing with [ErrSizeMismatch] where the write stops — the header and
+// part of the body are already emitted.
 //
 // # Byte order
 //
