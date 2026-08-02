@@ -83,22 +83,20 @@ type GroupedChunk interface {
 }
 
 // SubChunk is a leaf chunk carrying a byte payload.
+//
+// Body must produce exactly the BodySize the chunk declares; the writers
+// verify this and fail with ErrSizeMismatch. A payload of unknown length is
+// a *StreamingSubChunk instead — the writers recognize one by its type (or
+// by an embedded one) and size it from the bytes its stream produces.
 type SubChunk interface {
 	Chunk
 
 	// Body returns a reader over the chunk payload.
 	//
-	// A non-streaming sub-chunk returns an independent reader on every call, so
-	// it can be written more than once. A streaming sub-chunk returns the
-	// underlying stream, which can only be consumed once.
+	// A sub-chunk returns an independent reader on every call, so it can be
+	// written more than once. A *StreamingSubChunk returns its underlying
+	// stream instead, which can only be consumed once.
 	Body() io.Reader
-
-	// Streaming reports whether the payload length is still unknown.
-	// A streaming sub-chunk learns its BodySize only by having its payload
-	// read through; the other sub-chunks know it up front. Once drained, its
-	// BodySize must report exactly the bytes its Body produced — the writers
-	// back the size fields with it and verify it, failing with ErrSizeMismatch.
-	Streaming() bool
 }
 
 // groupBodySize is the body size of a grouped chunk: the group type plus every
@@ -168,13 +166,17 @@ func (c *InMemorySubChunk) ChunkID() FourCC { return c.ID }
 
 func (c *InMemorySubChunk) BodySize() int64 { return int64(len(c.Payload)) }
 
-func (c *InMemorySubChunk) Streaming() bool { return false }
-
 func (c *InMemorySubChunk) Body() io.Reader { return bytes.NewReader(c.Payload) }
 
 // StreamingSubChunk is a sub-chunk whose payload comes from an io.Reader of
 // unknown length. Only StreamingWriter can write it: the size field is
 // not known until the reader has been drained.
+//
+// It is what makes a chunk streaming: the writers recognize a sub-chunk as
+// streaming iff it is a *StreamingSubChunk or embeds one (a custom type
+// needs a non-nil embedded pointer, or writing panics), and they size it
+// from the bytes its stream produces — nothing such a type reports can
+// desynchronize the size fields from the bytes actually written.
 type StreamingSubChunk struct {
 	id   FourCC
 	body streamingChunkBody
@@ -191,13 +193,25 @@ func NewStreamingSubChunk(id FourCC, r io.Reader) *StreamingSubChunk {
 
 func (c *StreamingSubChunk) ChunkID() FourCC { return c.id }
 
+// BodySize is the number of bytes the stream has produced so far: zero
+// before the chunk is written, the final body size once it has been.
 func (c *StreamingSubChunk) BodySize() int64 { return c.body.readLength }
-
-func (c *StreamingSubChunk) Streaming() bool { return true }
 
 // Body returns the underlying stream. It can only be consumed once, and the chunk
 // only knows its BodySize after it has been consumed.
 func (c *StreamingSubChunk) Body() io.Reader { return &c.body }
+
+func (c *StreamingSubChunk) streamingBody() *streamingChunkBody { return &c.body }
+
+// streamer is how the writers recognize a streaming sub-chunk. Only
+// *StreamingSubChunk can carry the unexported method — a custom type becomes
+// streaming by embedding one — so every streaming body is library-owned: the
+// writers track duplication and consumption on the *streamingChunkBody
+// itself, drain it directly, and never depend on what an implementation
+// layered on top reports.
+type streamer interface {
+	streamingBody() *streamingChunkBody
+}
 
 type streamingChunkBody struct {
 	readLength int64
@@ -229,8 +243,6 @@ var _ SubChunk = (*SectionSubChunk)(nil)
 func (c *SectionSubChunk) ChunkID() FourCC { return c.ID }
 
 func (c *SectionSubChunk) BodySize() int64 { return c.SectionReader.Size() }
-
-func (c *SectionSubChunk) Streaming() bool { return false }
 
 // Body returns an independent reader over the section, leaving the embedded
 // *io.SectionReader untouched so the chunk can be written repeatedly.

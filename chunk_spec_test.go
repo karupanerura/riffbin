@@ -505,7 +505,6 @@ type oversizedSubChunk struct {
 
 func (c *oversizedSubChunk) ChunkID() riffbin.FourCC { return c.id }
 func (c *oversizedSubChunk) BodySize() int64         { return c.size }
-func (c *oversizedSubChunk) Streaming() bool         { return false }
 func (c *oversizedSubChunk) Body() io.Reader         { return strings.NewReader("") }
 
 // shortSubChunk produces fewer bytes than it declares.
@@ -515,7 +514,6 @@ type shortSubChunk struct {
 
 func (c *shortSubChunk) ChunkID() riffbin.FourCC { return c.id }
 func (c *shortSubChunk) BodySize() int64         { return 10 }
-func (c *shortSubChunk) Streaming() bool         { return false }
 func (c *shortSubChunk) Body() io.Reader         { return strings.NewReader("abc") }
 
 // A Chunk implementation reporting a negative body size cannot be encoded; the

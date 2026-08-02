@@ -131,13 +131,16 @@ type sizeFix struct {
 // also refuse chunks nested deeper than maxGroupDepth, so such a tree is rejected here
 // with an error instead of exhausting the stack.
 func validateTree(c *RIFFChunk, allowStreaming bool) error {
-	return validateChunk(c, true, allowStreaming, 0, map[SubChunk]struct{}{})
+	return validateChunk(c, true, allowStreaming, 0, map[*streamingChunkBody]struct{}{})
 }
 
-// validateChunk validates one chunk and its subtree; streamed collects every
-// streaming sub-chunk seen so far, so one placed twice in the tree is caught
-// here — the write of its second occurrence would find the stream drained.
-func validateChunk(c Chunk, root, allowStreaming bool, depth int, streamed map[SubChunk]struct{}) error {
+// validateChunk validates one chunk and its subtree; streamed collects the
+// body of every streaming sub-chunk seen so far, so one placed twice in the
+// tree is caught here — the write of its second occurrence would find the
+// stream drained. The bodies are library-owned pointers, so nothing is
+// assumed about the chunk values themselves: a custom SubChunk does not have
+// to be comparable.
+func validateChunk(c Chunk, root, allowStreaming bool, depth int, streamed map[*streamingChunkBody]struct{}) error {
 	id := c.ChunkID()
 	if !id.Valid() {
 		return fmt.Errorf("%w: chunk ID %q is not printable ASCII", ErrUnwritableChunk, id[:])
@@ -173,17 +176,22 @@ func validateChunk(c Chunk, root, allowStreaming bool, depth int, streamed map[S
 		case riffID, rifxID, listID:
 			return fmt.Errorf("%w: %s is a grouped-chunk ID but the chunk is a sub-chunk", ErrUnwritableChunk, id)
 		}
-		if cc.Streaming() {
+		if sc, ok := cc.(streamer); ok {
 			if !allowStreaming {
 				return ErrUnexpectedStreamingChunk
 			}
-			if _, dup := streamed[cc]; dup {
+			body := sc.streamingBody()
+			if _, dup := streamed[body]; dup {
 				return fmt.Errorf("%w: chunk[%q] is placed more than once in the tree; its stream would already be drained at the second occurrence", ErrConsumedStreamingChunk, id)
 			}
-			streamed[cc] = struct{}{}
-			if b := cc.BodySize(); b != 0 {
-				return fmt.Errorf("%w: chunk[%q] reports %d byte(s) before being written", ErrConsumedStreamingChunk, id, b)
+			streamed[body] = struct{}{}
+			if b := body.readLength; b != 0 {
+				return fmt.Errorf("%w: chunk[%q] stream has already produced %d byte(s) before this write", ErrConsumedStreamingChunk, id, b)
 			}
+			// the writers size a streaming chunk from the bytes its stream
+			// produces and never consult its BodySize, so there is nothing
+			// left to check
+			return nil
 		}
 	default:
 		return unsupportedChunkTypeError(c)
@@ -246,10 +254,16 @@ func writeChunk(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming boo
 }
 
 func writeChunkHeader(w io.Writer, c Chunk, order binary.ByteOrder) (n int64, err error) {
+	// a streaming chunk's size is known only once its stream is drained: its
+	// size field goes out as a zero placeholder and the backfill rewrites it
+	// from the bytes actually written. A group enclosing one declares the
+	// sizes its children report so far — also a placeholder, also rewritten.
 	var b uint32
-	b, err = chunkBodySize(c)
-	if err != nil {
-		return
+	if _, ok := c.(streamer); !ok {
+		b, err = chunkBodySize(c)
+		if err != nil {
+			return
+		}
 	}
 
 	var nn int
@@ -319,25 +333,17 @@ func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming
 			}
 		}
 	case SubChunk:
-		if cc.Streaming() {
+		if sc, ok := cc.(streamer); ok {
 			if !allowStreaming {
 				err = ErrUnexpectedStreamingChunk
 				return
 			}
 
-			// the body size of a streaming chunk is only known once it has been
-			// read; right after the copy it is known, and must equal the bytes
-			// the copy produced — it does not when the stream was consumed by an
-			// earlier occurrence of the same chunk in this tree, or when a custom
-			// implementation misreports. writeComplete backfills whatever
-			// BodySize reports, so a divergence here would corrupt the output.
-			n, err = io.Copy(w, cc.Body())
-			if err != nil {
-				return
-			}
-			if b := cc.BodySize(); b != n {
-				err = fmt.Errorf("%w: chunk[%q] produced %d byte(s) but reports %d after draining", ErrSizeMismatch, cc.ChunkID(), n, b)
-			}
+			// the stream is drained through the library-owned body — not the
+			// overridable Body — and the backfill writes the size fields from
+			// the bytes this copy produces, so nothing the chunk reports can
+			// desynchronize them from the output
+			n, err = io.Copy(w, sc.streamingBody())
 			return
 		}
 

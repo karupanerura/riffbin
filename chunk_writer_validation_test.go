@@ -446,22 +446,41 @@ func TestStreamingWriterRejectsDuplicateStreamingChunk(t *testing.T) {
 	}
 }
 
-// misreportingStreamingChunk drains its reader but keeps reporting a zero
-// BodySize — a broken custom SubChunk implementation.
-type misreportingStreamingChunk struct {
-	r io.Reader
+// lyingSizeStreamingChunk embeds a *StreamingSubChunk and overrides BodySize
+// with a lie. The embedded stream is what makes it streaming; the writers
+// work on that stream alone.
+type lyingSizeStreamingChunk struct {
+	*riffbin.StreamingSubChunk
 }
 
-func (c *misreportingStreamingChunk) ChunkID() riffbin.FourCC { return riffbin.MustParseFourCC("LIED") }
-func (c *misreportingStreamingChunk) BodySize() int64         { return 0 }
-func (c *misreportingStreamingChunk) Streaming() bool         { return true }
-func (c *misreportingStreamingChunk) Body() io.Reader         { return c.r }
+func (c *lyingSizeStreamingChunk) BodySize() int64 { return 1 }
 
-// The size fields are backed by what BodySize reports once the stream is
-// drained, so a streaming body that produced bytes its BodySize does not
-// report would desynchronize every offset after it. The write must stop with
-// ErrSizeMismatch at the divergence instead of emitting a corrupt file.
-func TestStreamingWriterRejectsMisreportedBodySize(t *testing.T) {
+// A type embedding *StreamingSubChunk is itself streaming: the stream
+// accessor is promoted, so Writer — which takes no streaming chunk — rejects
+// the tree before writing anything.
+func TestWriterRejectsEmbeddedStreamingChunk(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	n, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&lyingSizeStreamingChunk{riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), strings.NewReader("abc"))},
+		},
+	})
+	if !errors.Is(err, riffbin.ErrUnexpectedStreamingChunk) {
+		t.Errorf("should be ErrUnexpectedStreamingChunk but got: %v", err)
+	}
+	if n != 0 || buf.Len() != 0 {
+		t.Errorf("wrote %d byte(s) before failing", buf.Len())
+	}
+}
+
+// A streaming chunk is drained through its library-owned stream and the size
+// fields are backfilled from the bytes actually written, so nothing a type
+// layered on top reports can desynchronize the output: the lie never reaches
+// the file.
+func TestStreamingWriterIgnoresOverriddenBodySize(t *testing.T) {
 	t.Parallel()
 
 	m := &memWriteSeeker{}
@@ -469,15 +488,29 @@ func TestStreamingWriterRejectsMisreportedBodySize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = w.WriteChunk(&riffbin.RIFFChunk{
+	if _, err = w.WriteChunk(&riffbin.RIFFChunk{
 		FormType: riffbin.MustParseFourCC("TEST"),
 		Payload: []riffbin.Chunk{
-			&misreportingStreamingChunk{r: strings.NewReader("hello")},
+			&lyingSizeStreamingChunk{riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), strings.NewReader("hello"))},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT2"), Payload: []byte("wxyz")},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := riffbin.ReadAll(bytes.NewReader(m.buf))
+	if err != nil {
+		t.Fatalf("the written file does not parse: %v", err)
+	}
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("hello")},
 			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT2"), Payload: []byte("wxyz")},
 		},
 	})
-	if !errors.Is(err, riffbin.ErrSizeMismatch) {
-		t.Errorf("should be ErrSizeMismatch but got: %v", err)
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("diff = %s", df)
 	}
 }
 
@@ -547,5 +580,80 @@ func TestStreamingWriterRejectsConsumedChunk(t *testing.T) {
 	}
 	if n != 0 || len(m2.buf) != 0 {
 		t.Errorf("wrote %d byte(s) before failing", len(m2.buf))
+	}
+}
+
+// sliceBackedSubChunk is a custom SubChunk whose concrete type is not
+// comparable — a value type holding slices.
+type sliceBackedSubChunk struct {
+	id    riffbin.FourCC
+	parts [][]byte
+}
+
+func (c sliceBackedSubChunk) ChunkID() riffbin.FourCC { return c.id }
+
+func (c sliceBackedSubChunk) BodySize() (n int64) {
+	for _, p := range c.parts {
+		n += int64(len(p))
+	}
+	return
+}
+
+func (c sliceBackedSubChunk) Body() io.Reader {
+	rs := make([]io.Reader, len(c.parts))
+	for i, p := range c.parts {
+		rs[i] = bytes.NewReader(p)
+	}
+	return io.MultiReader(rs...)
+}
+
+// Any type honoring the SubChunk contract must be writable; in particular the
+// writers may not require the dynamic type to be comparable — a map keyed by
+// the interface value, or a comparison of chunk values, would panic on this
+// one. Streams are tracked by their library-owned body pointers instead.
+func TestWriterAcceptsNonComparableSubChunk(t *testing.T) {
+	t.Parallel()
+
+	tree := func() *riffbin.RIFFChunk {
+		return &riffbin.RIFFChunk{
+			FormType: riffbin.MustParseFourCC("TEST"),
+			Payload: []riffbin.Chunk{
+				sliceBackedSubChunk{id: riffbin.MustParseFourCC("DAT1"), parts: [][]byte{[]byte("ab"), []byte("cd")}},
+			},
+		}
+	}
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("abcd")},
+		},
+	})
+
+	var buf bytes.Buffer
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(tree()); err != nil {
+		t.Fatalf("Writer: %v", err)
+	}
+	got, err := riffbin.ReadAll(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Writer output does not parse: %v", err)
+	}
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("Writer: diff = %s", df)
+	}
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.WriteChunk(tree()); err != nil {
+		t.Fatalf("StreamingWriter: %v", err)
+	}
+	got, err = riffbin.ReadAll(bytes.NewReader(m.buf))
+	if err != nil {
+		t.Fatalf("StreamingWriter output does not parse: %v", err)
+	}
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("StreamingWriter: diff = %s", df)
 	}
 }

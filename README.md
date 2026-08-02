@@ -233,7 +233,7 @@ conventions. The changes are mechanical:
 | `OnMemorySubChunk` | `InMemorySubChunk` |
 | `InStreamSubChunk` | `SectionSubChunk`, matching `ReadSections` and `io.SectionReader` |
 | `IncompleteSubChunk`, `NewIncompleteSubChunk` | `StreamingSubChunk`, `NewStreamingSubChunk` — the size is unknown, not the data broken |
-| `SubChunk.Incomplete()` | `SubChunk.Streaming()` |
+| `SubChunk.Incomplete()` | removed — a sub-chunk is streaming iff it is (or embeds) a `*StreamingSubChunk`, and the writers size it from the bytes its stream actually produces |
 | `ErrUnexpectedIncompleteChunk` | `ErrUnexpectedStreamingChunk` |
 | `Chunk.ChunkID() []byte` | `Chunk.ChunkID() FourCC` — compare with `==`, print with `%s` |
 | `Chunk.BodySize() uint32` | `Chunk.BodySize() int64` — sizes above 4 GiB now fail instead of wrapping |
