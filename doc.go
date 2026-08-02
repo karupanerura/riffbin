@@ -24,10 +24,14 @@
 // room for one. Two deviations common in real files are still read without an
 // option: a final chunk whose parent size stops right at the odd body, and a
 // single 0x00 after the root chunk left by writers that append the last pad
-// byte without counting it. [AllowPaddingViolations] additionally reads files
+// byte without counting it. [AllowOmittedPadding] additionally reads files
 // that omit pad bytes entirely (riffbin up to v0.0.6 wrote such files, and
-// e.g. Apple CoreAudio still writes them) or whose pad bytes hold garbage
-// instead of zero.
+// e.g. Apple CoreAudio still writes them); [AllowGarbagePadding] reads files
+// whose pad bytes hold garbage instead of zero, skipping them without
+// inspection like the reference readers do. The two are mutually exclusive
+// ([ErrConflictingOptions]): a printable garbage pad is indistinguishable from
+// the next header of an unpadded file, so each option declares which way that
+// byte reads — declare the deviation the input actually has.
 //
 // # Reading
 //
@@ -53,8 +57,9 @@
 //		// ...
 //	}
 //
-// [AllowPaddingViolations] and [AllowTrailingData] relax individual rules for files
-// that do not follow the specification. With [AllowTrailingData] a call consumes
+// [AllowOmittedPadding], [AllowGarbagePadding] and [AllowTrailingData] relax
+// individual rules for files that do not follow the specification. With
+// [AllowTrailingData] a call consumes
 // exactly one root chunk and leaves the input right after it, so a stream of
 // concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the 32-bit
 // size field by appending RIFF("AVIX") chunks — is read by calling [ReadAll]

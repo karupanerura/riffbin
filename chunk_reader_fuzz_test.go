@@ -137,15 +137,20 @@ func FuzzReadAllLenient(f *testing.F) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		c, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowPaddingViolations(), riffbin.AllowTrailingData())
-		if (c == nil) == (err == nil) {
-			t.Log(hex.Dump(b))
-			t.Fatal("invalid result")
-		}
-		// a leniently-read tree must still write back as a compliant file that
-		// re-reads strictly to the same tree
-		if c != nil {
-			checkRoundTrip(t, b, c)
+		for _, opts := range [][]riffbin.ReaderOption{
+			{riffbin.AllowOmittedPadding(), riffbin.AllowTrailingData()},
+			{riffbin.AllowGarbagePadding(), riffbin.AllowTrailingData()},
+		} {
+			c, err := riffbin.ReadAll(bytes.NewReader(b), opts...)
+			if (c == nil) == (err == nil) {
+				t.Log(hex.Dump(b))
+				t.Fatal("invalid result")
+			}
+			// a leniently-read tree must still write back as a compliant file
+			// that re-reads strictly to the same tree
+			if c != nil {
+				checkRoundTrip(t, b, c)
+			}
 		}
 	})
 }
@@ -198,7 +203,8 @@ func FuzzReadersAgree(f *testing.F) {
 			opts []riffbin.ReaderOption
 		}{
 			{name: "strict"},
-			{name: "lenient", opts: []riffbin.ReaderOption{riffbin.AllowPaddingViolations(), riffbin.AllowTrailingData()}},
+			{name: "lenientOmitted", opts: []riffbin.ReaderOption{riffbin.AllowOmittedPadding(), riffbin.AllowTrailingData()}},
+			{name: "lenientGarbage", opts: []riffbin.ReaderOption{riffbin.AllowGarbagePadding(), riffbin.AllowTrailingData()}},
 		} {
 			full, fullErr := riffbin.ReadAll(bytes.NewReader(b), mode.opts...)
 			sections, sectionsErr := riffbin.ReadSections(bytes.NewReader(b), mode.opts...)

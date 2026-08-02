@@ -42,6 +42,12 @@ var (
 	// chunks nested deeper than the readers read back.
 	ErrUnwritableChunk = errors.New("riffbin: unwritable chunk")
 
+	// ErrConflictingOptions is returned when reader options that resolve the same byte
+	// in conflicting ways are combined: AllowOmittedPadding reads a printable byte at
+	// a pad position as the head of the next chunk header, AllowGarbagePadding skips
+	// it as a pad byte holding garbage, and no reader can do both.
+	ErrConflictingOptions = errors.New("riffbin: conflicting reader options")
+
 	// ErrConsumedStreamingChunk is returned when a streaming sub-chunk is written after its
 	// body stream has already been consumed — or is placed more than once in one tree, so
 	// a later occurrence would find it consumed. Either way the header would count bytes

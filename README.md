@@ -13,7 +13,8 @@ the chunked container behind WAVE, AVI, WebP and many other formats.
 * Iterates parsed trees (`Walk`) and streams of concatenated RIFF chunks
   (`Concatenated`, the AVI 2.0 layout)
 * RIFX (big-endian RIFF) in both directions
-* Strict about the specification, with opt-in leniency for files that are not
+* Strict about the specification, with opt-in leniency for files that do not
+  follow it
 * Ships `cmd/riffdump` to print the chunk tree of a RIFF file
 
 Requires Go 1.26.
@@ -50,8 +51,11 @@ emit it.
 The readers require the pad byte whenever the enclosing size says there is room for
 one. Two deviations common in real files are still read without an option: a final
 chunk whose pad byte was left uncounted, and the single trailing `0x00` such a file
-ends with. `AllowPaddingViolations` additionally reads files that omit pad bytes
-entirely or whose pad bytes hold garbage instead of zero (see Example 4).
+ends with. `AllowOmittedPadding` additionally reads files that omit pad bytes
+entirely, and `AllowGarbagePadding` files whose pad bytes hold garbage instead of
+zero (see Example 4). The two are mutually exclusive: a printable garbage pad is
+indistinguishable from the next header of an unpadded file, so each option declares
+which way that byte reads.
 
 # Examples
 
@@ -143,9 +147,12 @@ and is never classified as a format error.
 ## Example 4: read files that do not follow the specification
 
 ```go
-// accept a missing pad byte after an odd-sized chunk (riffbin <= v0.0.6 wrote such
-// files, and e.g. Apple CoreAudio still writes them), or a pad byte holding garbage
-riffChunk, err := riffbin.ReadAll(r, riffbin.AllowPaddingViolations())
+// accept omitted pad bytes after odd-sized chunks (riffbin <= v0.0.6 wrote such
+// files, and e.g. Apple CoreAudio still writes them)
+riffChunk, err := riffbin.ReadAll(r, riffbin.AllowOmittedPadding())
+
+// accept pad bytes holding garbage instead of zero
+riffChunk, err = riffbin.ReadAll(r, riffbin.AllowGarbagePadding())
 
 // ignore whatever follows the RIFF chunk
 riffChunk, err = riffbin.ReadAll(r, riffbin.AllowTrailingData())
@@ -235,7 +242,7 @@ conventions. The changes are mechanical:
 | unexported grouped-chunk interface | exported `GroupedChunk`; its contained chunks are `Children()`, since the specification calls every nested chunk — a `LIST` included — a subchunk |
 | `err == riffbin.ErrInvalidFormat` | `errors.Is(err, riffbin.ErrInvalidFormat)` |
 | an empty input was `ErrInvalidFormat` | it is `io.EOF`, the clean end of a chunk stream |
-| unpadded files read silently | pass `riffbin.AllowPaddingViolations()` |
+| unpadded files read silently | pass `riffbin.AllowOmittedPadding()`; the new `AllowGarbagePadding()` reads nonzero pad bytes instead — the two declare conflicting readings of the same byte and are mutually exclusive |
 
 Input that used to be accepted silently — a nested `RIFF` chunk, a non-ASCII chunk ID, a
 truncated body — is now rejected. The writers validate the tree before emitting anything:

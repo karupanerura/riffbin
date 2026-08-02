@@ -358,10 +358,12 @@ func TestChunksAgreesWithTreeReaders(t *testing.T) {
 		"leadingPad": append([]byte{0x00}, paddedFileBytes...),
 	}
 	modes := map[string][]riffbin.ReaderOption{
-		"strict":           nil,
-		"paddingViolation": {riffbin.AllowPaddingViolations()},
-		"trailingData":     {riffbin.AllowTrailingData()},
-		"lenient":          {riffbin.AllowPaddingViolations(), riffbin.AllowTrailingData()},
+		"strict":         nil,
+		"omittedPadding": {riffbin.AllowOmittedPadding()},
+		"garbagePadding": {riffbin.AllowGarbagePadding()},
+		"trailingData":   {riffbin.AllowTrailingData()},
+		"lenientOmitted": {riffbin.AllowOmittedPadding(), riffbin.AllowTrailingData()},
+		"lenientGarbage": {riffbin.AllowGarbagePadding(), riffbin.AllowTrailingData()},
 	}
 	for mode, opts := range modes {
 		for name, b := range inputs {
