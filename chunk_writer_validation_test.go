@@ -371,6 +371,32 @@ func TestStreamingWriterEmptyBody(t *testing.T) {
 	}
 }
 
+// The same streaming sub-chunk placed twice in one tree would drain its stream
+// at the first occurrence and write a lying header at the second; the tree is
+// rejected before the first byte, like every defect that is checkable up front.
+func TestStreamingWriterRejectsDuplicateStreamingChunk(t *testing.T) {
+	t.Parallel()
+
+	shared := riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DATA"), strings.NewReader("abcdef"))
+	tree := &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{shared, shared},
+	}
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := w.WriteChunk(tree)
+	if !errors.Is(err, riffbin.ErrConsumedStreamingChunk) {
+		t.Errorf("should be ErrConsumedStreamingChunk but got: %v", err)
+	}
+	if n != 0 || len(m.buf) != 0 {
+		t.Errorf("wrote %d byte(s) before failing", len(m.buf))
+	}
+}
+
 // misreportingStreamingChunk drains its reader but keeps reporting a zero
 // BodySize — a broken custom SubChunk implementation.
 type misreportingStreamingChunk struct {

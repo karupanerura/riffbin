@@ -41,7 +41,8 @@ var (
 	ErrUnwritableChunk = errors.New("riffbin: unwritable chunk")
 
 	// ErrConsumedStreamingChunk is returned when a streaming sub-chunk is written after its
-	// body stream has already been consumed, which would emit a header whose size counts bytes
+	// body stream has already been consumed — or is placed more than once in one tree, so
+	// a later occurrence would find it consumed. Either way the header would count bytes
 	// that are no longer available.
 	ErrConsumedStreamingChunk = errors.New("riffbin: streaming chunk already consumed")
 )

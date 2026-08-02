@@ -31,7 +31,7 @@ func NewWriter(w io.Writer) *Writer {
 // WriteChunk writes the RIFF chunk tree to the underlying data stream.
 // It returns the number of bytes written and any error encountered that caused the write to stop early.
 func (w *Writer) WriteChunk(c *RIFFChunk) (int64, error) {
-	if err := validateChunk(c, true, false, 0); err != nil {
+	if err := validateTree(c, false); err != nil {
 		return 0, err
 	}
 	return writeChunk(w.w, c, c.ByteOrder.binary(), false)
@@ -62,7 +62,7 @@ func NewStreamingWriter(w io.WriteSeeker) (*StreamingWriter, error) {
 // and re-writes every chunk size field once the streaming bodies have been consumed.
 // It returns the number of bytes written and any error encountered that caused the write to stop early.
 func (w *StreamingWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
-	if err = validateChunk(c, true, true, 0); err != nil {
+	if err = validateTree(c, true); err != nil {
 		return 0, err
 	}
 
@@ -159,12 +159,19 @@ func writeComplete(c Chunk, pos *int64, f func(b uint32) error) error {
 	return nil
 }
 
-// validateChunk checks, before a single byte is written, that the tree can be written as
+// validateTree checks, before a single byte is written, that the tree can be written as
 // a RIFF file the readers accept. The readers dispatch on chunk IDs, so a sub-chunk using
 // a structural ID or a nested RIFF chunk would be read back as a different structure; they
 // also refuse chunks nested deeper than maxGroupDepth, so such a tree is rejected here
 // with an error instead of exhausting the stack.
-func validateChunk(c Chunk, root, allowStreaming bool, depth int) error {
+func validateTree(c *RIFFChunk, allowStreaming bool) error {
+	return validateChunk(c, true, allowStreaming, 0, map[SubChunk]struct{}{})
+}
+
+// validateChunk validates one chunk and its subtree; streamed collects every
+// streaming sub-chunk seen so far, so one placed twice in the tree is caught
+// here — the write of its second occurrence would find the stream drained.
+func validateChunk(c Chunk, root, allowStreaming bool, depth int, streamed map[SubChunk]struct{}) error {
 	id := c.ChunkID()
 	if !id.Valid() {
 		return fmt.Errorf("%w: chunk ID %q is not printable ASCII", ErrUnwritableChunk, id[:])
@@ -186,7 +193,7 @@ func validateChunk(c Chunk, root, allowStreaming bool, depth int) error {
 			return fmt.Errorf("%w: a %s chunk must not be nested", ErrUnwritableChunk, id)
 		}
 		for _, p := range cc.Children() {
-			if err := validateChunk(p, false, allowStreaming, depth+1); err != nil {
+			if err := validateChunk(p, false, allowStreaming, depth+1, streamed); err != nil {
 				return err
 			}
 		}
@@ -199,6 +206,10 @@ func validateChunk(c Chunk, root, allowStreaming bool, depth int) error {
 			if !allowStreaming {
 				return ErrUnexpectedStreamingChunk
 			}
+			if _, dup := streamed[cc]; dup {
+				return fmt.Errorf("%w: chunk[%q] is placed more than once in the tree; its stream would already be drained at the second occurrence", ErrConsumedStreamingChunk, id)
+			}
+			streamed[cc] = struct{}{}
 			if b := cc.BodySize(); b != 0 {
 				return fmt.Errorf("%w: chunk[%q] reports %d byte(s) before being written", ErrConsumedStreamingChunk, id, b)
 			}
