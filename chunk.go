@@ -197,8 +197,10 @@ func (c *StreamingSubChunk) ChunkID() FourCC { return c.id }
 // before the chunk is written, the final body size once it has been.
 func (c *StreamingSubChunk) BodySize() int64 { return c.body.readLength }
 
-// Body returns the underlying stream. It can only be consumed once, and the chunk
-// only knows its BodySize after it has been consumed.
+// Body returns the underlying stream, which can only be consumed once: any
+// read from it marks the chunk consumed — a later write fails with
+// ErrConsumedStreamingChunk — and the chunk knows its BodySize only after
+// the stream has been drained.
 func (c *StreamingSubChunk) Body() io.Reader { return &c.body }
 
 func (c *StreamingSubChunk) streamingBody() *streamingChunkBody { return &c.body }
@@ -213,18 +215,25 @@ type streamer interface {
 	streamingBody() *streamingChunkBody
 }
 
+// streamingChunkBody is the single-consumption stream of a StreamingSubChunk.
+// Any Read or WriteTo call marks it consumed — one producing no bytes
+// included — which is what the writers check: a byte count cannot tell a
+// drained empty stream from a fresh one.
 type streamingChunkBody struct {
 	readLength int64
+	consumed   bool
 	reader     io.Reader
 }
 
 func (c *streamingChunkBody) Read(p []byte) (n int, err error) {
+	c.consumed = true
 	n, err = c.reader.Read(p)
 	c.readLength += int64(n)
 	return
 }
 
 func (c *streamingChunkBody) WriteTo(w io.Writer) (n int64, err error) {
+	c.consumed = true
 	n, err = io.Copy(w, c.reader)
 	c.readLength += n
 	return

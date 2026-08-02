@@ -181,13 +181,13 @@ func validateChunk(c Chunk, root, allowStreaming bool, depth int, streamed map[*
 				return ErrUnexpectedStreamingChunk
 			}
 			body := sc.streamingBody()
+			if body.consumed {
+				return fmt.Errorf("%w: chunk[%q] stream was already consumed after producing %d byte(s)", ErrConsumedStreamingChunk, id, body.readLength)
+			}
 			if _, dup := streamed[body]; dup {
 				return fmt.Errorf("%w: chunk[%q] is placed more than once in the tree; its stream would already be drained at the second occurrence", ErrConsumedStreamingChunk, id)
 			}
 			streamed[body] = struct{}{}
-			if b := body.readLength; b != 0 {
-				return fmt.Errorf("%w: chunk[%q] stream has already produced %d byte(s) before this write", ErrConsumedStreamingChunk, id, b)
-			}
 			// the writers size a streaming chunk from the bytes its stream
 			// produces and never consult its BodySize, so there is nothing
 			// left to check

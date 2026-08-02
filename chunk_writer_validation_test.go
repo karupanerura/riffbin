@@ -583,6 +583,48 @@ func TestStreamingWriterRejectsConsumedChunk(t *testing.T) {
 	}
 }
 
+// A drained stream that happened to be empty is still consumed: writing the
+// chunk again must fail like any other reuse, not silently write whatever the
+// underlying reader holds by then. A byte count cannot tell the two apart —
+// consumption is tracked as its own state.
+func TestStreamingWriterRejectsConsumedEmptyChunk(t *testing.T) {
+	t.Parallel()
+
+	var backing bytes.Buffer
+	tree := &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("ENT1"), &backing),
+		},
+	}
+
+	m1 := &memWriteSeeker{}
+	w1, err := riffbin.NewStreamingWriter(m1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// an empty streaming chunk is a valid zero-sized chunk
+	if _, err = w1.WriteChunk(tree); err != nil {
+		t.Fatal(err)
+	}
+
+	// refill the underlying reader; the stream is consumed regardless
+	backing.WriteString("late data")
+
+	m2 := &memWriteSeeker{}
+	w2, err := riffbin.NewStreamingWriter(m2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := w2.WriteChunk(tree)
+	if !errors.Is(err, riffbin.ErrConsumedStreamingChunk) {
+		t.Errorf("should be ErrConsumedStreamingChunk but got: %v", err)
+	}
+	if n != 0 || len(m2.buf) != 0 {
+		t.Errorf("wrote %d byte(s) before failing", len(m2.buf))
+	}
+}
+
 // sliceBackedSubChunk is a custom SubChunk whose concrete type is not
 // comparable — a value type holding slices.
 type sliceBackedSubChunk struct {
