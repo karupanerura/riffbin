@@ -371,6 +371,80 @@ func TestStreamingWriterEmptyBody(t *testing.T) {
 	}
 }
 
+// misreportingStreamingChunk drains its reader but keeps reporting a zero
+// BodySize — a broken custom SubChunk implementation.
+type misreportingStreamingChunk struct {
+	r io.Reader
+}
+
+func (c *misreportingStreamingChunk) ChunkID() riffbin.FourCC { return riffbin.MustParseFourCC("LIED") }
+func (c *misreportingStreamingChunk) BodySize() int64         { return 0 }
+func (c *misreportingStreamingChunk) Streaming() bool         { return true }
+func (c *misreportingStreamingChunk) Body() io.Reader         { return c.r }
+
+// The size fields are backed by what BodySize reports once the stream is
+// drained, so a streaming body that produced bytes its BodySize does not
+// report would desynchronize every offset after it. The write must stop with
+// ErrSizeMismatch at the divergence instead of emitting a corrupt file.
+func TestStreamingWriterRejectsMisreportedBodySize(t *testing.T) {
+	t.Parallel()
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&misreportingStreamingChunk{r: strings.NewReader("hello")},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT2"), Payload: []byte("wxyz")},
+		},
+	})
+	if !errors.Is(err, riffbin.ErrSizeMismatch) {
+		t.Errorf("should be ErrSizeMismatch but got: %v", err)
+	}
+}
+
+// Two streaming sub-chunks sharing one underlying reader are beyond what the
+// writer can see: the first drains the stream and the second truthfully
+// reports the zero bytes it produced, so the output is a valid file whose
+// second chunk is empty.
+func TestStreamingWriterSharedUnderlyingReader(t *testing.T) {
+	t.Parallel()
+
+	r := strings.NewReader("abcdef")
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), r),
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT2"), r),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := riffbin.ReadAll(bytes.NewReader(m.buf))
+	if err != nil {
+		t.Fatalf("the written file does not parse: %v", err)
+	}
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("abcdef")},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT2"), Payload: []byte{}},
+		},
+	})
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("diff = %s", df)
+	}
+}
+
 // A streaming sub-chunk whose stream was already consumed would write a header
 // counting bytes that can no longer be produced.
 func TestStreamingWriterRejectsConsumedChunk(t *testing.T) {

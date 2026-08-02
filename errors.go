@@ -22,9 +22,10 @@ var (
 	// ErrChunkTooLarge is returned when a chunk body does not fit in the 32-bit RIFF size field.
 	ErrChunkTooLarge = errors.New("riffbin: chunk too large")
 
-	// ErrSizeMismatch is returned when a sub-chunk produces a different number of bytes than
-	// its BodySize reports. The write stops where the mismatch is found rather than
-	// completing a corrupt file; the bytes already written remain in the output.
+	// ErrSizeMismatch is returned when a sub-chunk produces a different number of bytes
+	// than its BodySize reports — for a streaming sub-chunk, when BodySize disagrees
+	// with the bytes just drained. The write stops where the mismatch is found rather
+	// than completing a corrupt file; the bytes already written remain in the output.
 	ErrSizeMismatch = errors.New("riffbin: chunk body size mismatch")
 
 	// ErrUnsupportedChunkType is returned when a Chunk implements neither GroupedChunk nor SubChunk.

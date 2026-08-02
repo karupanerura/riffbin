@@ -90,7 +90,9 @@ type SubChunk interface {
 
 	// Streaming reports whether the payload length is still unknown.
 	// A streaming sub-chunk learns its BodySize only by having its payload
-	// read through; the other sub-chunks know it up front.
+	// read through; the other sub-chunks know it up front. Once drained, its
+	// BodySize must report exactly the bytes its Body produced — the writers
+	// back the size fields with it and verify it, failing with ErrSizeMismatch.
 	Streaming() bool
 }
 

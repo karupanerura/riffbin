@@ -329,9 +329,19 @@ func writeChunkBody(w io.Writer, c Chunk, order binary.ByteOrder, allowStreaming
 				return
 			}
 
-			// the body size of a streaming chunk is only known once it has been read,
-			// so there is nothing to verify it against
+			// the body size of a streaming chunk is only known once it has been
+			// read; right after the copy it is known, and must equal the bytes
+			// the copy produced — it does not when the stream was consumed by an
+			// earlier occurrence of the same chunk in this tree, or when a custom
+			// implementation misreports. writeComplete backfills whatever
+			// BodySize reports, so a divergence here would corrupt the output.
 			n, err = io.Copy(w, cc.Body())
+			if err != nil {
+				return
+			}
+			if b := cc.BodySize(); b != n {
+				err = fmt.Errorf("%w: chunk[%q] produced %d byte(s) but reports %d after draining", ErrSizeMismatch, cc.ChunkID(), n, b)
+			}
 			return
 		}
 
