@@ -110,7 +110,10 @@
 // cannot desynchronize the size fields from the bytes actually written, pass
 // a failed write off as a success, or drive the writers into unbounded
 // recursion; a panic raised inside the
-// implementation's own methods still propagates.
+// implementation's own methods still propagates. The one count taken on trust
+// is a destination's own io.ReaderFrom: where the destination provides one the
+// writers let it consume the body, and the bytes it reports are the bytes the
+// size fields and offsets are derived from.
 //
 // # Byte order
 //

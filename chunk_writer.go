@@ -442,6 +442,10 @@ var (
 	errFileBoundExceeded    = errors.New("output crossed the RIFF file size bound")
 )
 
+// onlyWriter hides every ability of the wrapped writer but Write, so a
+// wrapper's own copy fallback cannot recurse into its ReadFrom.
+type onlyWriter struct{ io.Writer }
+
 // countingWriter counts the bytes its underlying writer accepted, and latches
 // the first error the writer returned. It is the measurement the writers
 // trust: io.Copy hands the copy to the source's own WriteTo when it has one,
@@ -462,11 +466,28 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// ReadFrom keeps the destination's own ReadFrom reachable through the
+// wrapper, so a source without a WriteTo does not cost io.Copy a scratch
+// buffer per copy. It is the one place the writers take a count on trust:
+// what the destination's ReadFrom reports is what the counter advances by.
+func (cw *countingWriter) ReadFrom(r io.Reader) (int64, error) {
+	rf, ok := cw.w.(io.ReaderFrom)
+	if !ok {
+		return io.Copy(onlyWriter{cw}, r)
+	}
+	n, err := rf.ReadFrom(r)
+	cw.n += n
+	if err != nil && cw.firstErr == nil {
+		cw.firstErr = err
+	}
+	return n, err
+}
+
 // cappedWriter passes writes through until remaining bytes have gone out,
 // then stops accepting: the write that would cross the cap is truncated to
 // it and fails with the sentinel its creator chose. A source staying within
-// the cap never notices — io.Copy keeps its WriteTo fast path — and one
-// producing more is cut off at the boundary instead of being drained.
+// the cap never notices — io.Copy keeps its WriteTo and ReadFrom fast paths —
+// and one producing more is cut off at the boundary instead of being drained.
 // Crossing the cap also latches truncated: the sentinel travels through the
 // source's own WriteTo, which can swallow it, but the latch cannot be.
 type cappedWriter struct {
@@ -499,6 +520,34 @@ func (cw *cappedWriter) Write(p []byte) (int, error) {
 		err = cw.sentinel
 	}
 	return n, err
+}
+
+// ReadFrom keeps the destination's ReadFrom reachable while holding the cap:
+// the destination reads at most the remaining bytes, and one probe byte tells
+// a source that ended exactly at the cap from one crossing it.
+func (cw *cappedWriter) ReadFrom(r io.Reader) (int64, error) {
+	rf, ok := cw.w.(io.ReaderFrom)
+	if !ok {
+		return io.Copy(onlyWriter{cw}, r)
+	}
+	n, err := rf.ReadFrom(io.LimitReader(r, cw.remaining))
+	if n > cw.remaining {
+		n = cw.remaining
+	}
+	cw.remaining -= n
+	if err != nil || cw.remaining > 0 {
+		return n, err
+	}
+	// the cap is exactly full: over iff the source still has a byte
+	var b [1]byte
+	switch pn, perr := r.Read(b[:]); {
+	case pn > 0:
+		cw.truncated = true
+		return n, cw.sentinel
+	case perr != nil && !errors.Is(perr, io.EOF):
+		return n, perr
+	}
+	return n, nil
 }
 
 func unsupportedChunkTypeError(c Chunk) error {

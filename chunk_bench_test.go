@@ -87,3 +87,24 @@ func BenchmarkChunksEarlyBreak(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkWriteSections writes a tree of SectionSubChunk leaves — bodies
+// without a WriteTo — through a destination with a ReadFrom, the shape that
+// must not cost io.Copy a scratch buffer per leaf.
+func BenchmarkWriteSections(b *testing.B) {
+	f := aviShapedFile(benchChunkCount)
+	tree, err := riffbin.ReadSections(bytes.NewReader(f))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(int64(len(f)))
+	b.ReportAllocs()
+	var buf bytes.Buffer
+	buf.Grow(len(f))
+	for b.Loop() {
+		buf.Reset()
+		if _, err := riffbin.NewWriter(&buf).WriteChunk(tree); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
