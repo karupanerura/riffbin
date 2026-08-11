@@ -242,6 +242,109 @@ func TestChunksAgreeOnTruncatedInput(t *testing.T) {
 	}
 }
 
+// seekCountingReader is a full ReadSeekerAt that records the forward seeks
+// made over it, so a test can prove the parser took the seek shortcut rather
+// than assume it.
+type seekCountingReader struct {
+	*bytes.Reader
+	skips int
+}
+
+func (s *seekCountingReader) Seek(off int64, whence int) (int64, error) {
+	if whence == io.SeekCurrent && off > 0 {
+		s.skips++
+	}
+	return s.Reader.Seek(off, whence)
+}
+
+// bigBodyFile builds a RIFF file holding one leaf body of the given size,
+// between two small ones — large enough that skipping it takes the seek
+// shortcut rather than reading through.
+func bigBodyFile(t *testing.T, size int) []byte {
+	t.Helper()
+
+	big := make([]byte, size)
+	for i := range big {
+		big[i] = byte('a' + i%26)
+	}
+	var buf bytes.Buffer
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("HDR "), Payload: []byte("xy")},
+			&riffbin.ListChunk{
+				ListType: riffbin.MustParseFourCC("LST1"),
+				Payload: []riffbin.Chunk{
+					&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("BIG "), Payload: big},
+				},
+			},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("TAIL"), Payload: []byte("z")},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// collectSkipped walks the chunks without reading a single body, so every
+// body is skipped — the only way the seek shortcut is ever taken.
+func collectSkipped(r io.Reader) ([]chunkEvent, string) {
+	var events []chunkEvent
+	var errText string
+	for info, err := range riffbin.Chunks(r) {
+		if err != nil {
+			errText = err.Error()
+			break
+		}
+		ev := chunkEvent{Depth: info.Depth, ID: info.ID.String(), BodySize: info.BodySize, BodyOffset: info.BodyOffset}
+		if info.Grouped() {
+			ev.GroupType = info.GroupType.String()
+		}
+		events = append(events, ev)
+	}
+	return events, errText
+}
+
+// Only a body larger than the skip threshold is skipped by seeking, and only
+// when it is left unread — every other differential test in this package runs
+// on bodies small enough that both paths execute the same read-through code.
+// This one holds the seek shortcut to the read-through path it stands in for:
+// the same chunks and the same error, on the whole file and on every prefix
+// of it, with the seeks counted so the shortcut cannot quietly stop running.
+func TestChunksAgreeOnSeekSkippedBody(t *testing.T) {
+	t.Parallel()
+
+	// odd, so the big chunk carries a pad byte the skip must not swallow
+	full := bigBodyFile(t, 8193)
+
+	counting := &seekCountingReader{Reader: bytes.NewReader(full)}
+	seekEvents, seekErr := collectSkipped(counting)
+	if counting.skips == 0 {
+		t.Fatal("no forward seek was made: the seek shortcut never ran, so this test proves nothing")
+	}
+	plainEvents, plainErr := collectSkipped(onlyReader{bytes.NewReader(full)})
+	if df := cmp.Diff(plainEvents, seekEvents); df != "" {
+		t.Errorf("the parser paths yield different chunks: %s", df)
+	}
+	if plainErr != seekErr {
+		t.Errorf("the parser paths report different errors:\n  read-through: %s\n  seeking:      %s", plainErr, seekErr)
+	}
+
+	// every prefix: a skip running past the end of the input must fail exactly
+	// where reading through would, not succeed because seeking past EOF does
+	for n := 0; n < len(full); n++ {
+		truncated := full[:n]
+		plainEvents, plainErr := collectSkipped(onlyReader{bytes.NewReader(truncated)})
+		seekEvents, seekErr := collectSkipped(bytes.NewReader(truncated))
+		if df := cmp.Diff(plainEvents, seekEvents); df != "" {
+			t.Fatalf("%d bytes: the parser paths yield different chunks: %s", n, df)
+		}
+		if plainErr != seekErr {
+			t.Fatalf("%d bytes: the parser paths report different errors:\n  read-through: %s\n  seeking:      %s", n, plainErr, seekErr)
+		}
+	}
+}
+
 // A body left unread must be skipped, and BodyOffset must address it for later
 // reads — the streaming equivalent of what ReadSections provides.
 func TestChunksBodyOffsetAddressesUnreadBodies(t *testing.T) {
