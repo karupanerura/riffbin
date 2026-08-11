@@ -581,6 +581,65 @@ func TestOmittedPadIsAmbiguous(t *testing.T) {
 // left uncounted by every enclosing size. Either alone must suffice, whatever
 // the order of the chunks: acceptance must not depend on which child happens
 // to come last.
+func TestTrailingRootPadByte(t *testing.T) {
+	t.Parallel()
+
+	// root body 23 (odd): "aaaa" omits its pad byte mid-file, "bbbb" is even.
+	oddRootEvenFinal := []byte{
+		'R', 'I', 'F', 'F', 0x17, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'a', 'a', 'a', 'a', 0x01, 0x00, 0x00, 0x00, 0xAA,
+		'b', 'b', 'b', 'b', 0x02, 0x00, 0x00, 0x00, 0xBB, 0xBB,
+		0x00, // the root chunk's own word-alignment pad byte
+	}
+	// the same two children swapped: root body still 23, "aaaa" now final and
+	// its uncounted pad byte doubles as the root's.
+	oddRootOddFinal := []byte{
+		'R', 'I', 'F', 'F', 0x17, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'b', 'b', 'b', 'b', 0x02, 0x00, 0x00, 0x00, 0xBB, 0xBB,
+		'a', 'a', 'a', 'a', 0x01, 0x00, 0x00, 0x00, 0xAA,
+		0x00,
+	}
+
+	for name, b := range map[string][]byte{
+		"OddRootEvenFinalChild": oddRootEvenFinal,
+		"OddRootOddFinalChild":  oddRootOddFinal,
+	} {
+		name, b := name, b
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.PadOmitted); err != nil {
+				t.Errorf("ReadAll should accept the pad byte but got: %v", err)
+			}
+			if _, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.PadOmitted); err != nil {
+				t.Errorf("ReadSections should accept the pad byte but got: %v", err)
+			}
+			// the identical bytes as a concatenated stream: every entry point
+			// must agree with the single-chunk readers
+			stream := append(append([]byte{}, b...), b...)
+			var count int
+			for _, err := range riffbin.Concatenated(bytes.NewReader(stream), riffbin.PadOmitted) {
+				if err != nil {
+					t.Fatalf("chunk %d: %v", count, err)
+				}
+				count++
+			}
+			if count != 2 {
+				t.Errorf("should yield 2 chunks but got: %d", count)
+			}
+		})
+	}
+
+	t.Run("StrictModeIsUnchanged", func(t *testing.T) {
+		// without PadOmitted the mid-file omitted pad is rejected before the
+		// trailing byte is ever reached
+		t.Parallel()
+		if _, err := riffbin.ReadAll(bytes.NewReader(oddRootEvenFinal)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			t.Errorf("should be ErrInvalidFormat but got: %v", err)
+		}
+	})
+}
+
 func TestReadSectionsPadding(t *testing.T) {
 	t.Parallel()
 

@@ -101,7 +101,7 @@ func (f readerOptionFunc) apply(c *readerConfig) { f(c) }
 // forward-only reader an uncounted pad byte can only be told from the next header by
 // reading it, and a byte read past the chunk could not be handed back between calls.)
 // Without the option that byte is still tolerated at the very end of the input, after
-// an odd-sized final chunk.
+// a root chunk whose size or final chunk calls for it.
 func AllowTrailingData() ReaderOption {
 	return readerOptionFunc(func(c *readerConfig) { c.allowTrailingData = true })
 }
@@ -452,10 +452,12 @@ type parser struct {
 	bodyOff       int64 // the body offset, where a truncation is reported
 	bodyRemaining int64
 
-	// tolerateTrailingPad is true when the chunk read last has an odd-sized body whose
-	// pad byte is not counted in its parent's size, so a single 0x00 may follow the
-	// root chunk. See verifyEnd.
-	tolerateTrailingPad bool
+	// lastPadUncounted reports whether the chunk handled last had an odd-sized
+	// body whose pad byte lies outside every enclosing declared size. Such a
+	// pad byte can only follow the whole root chunk, where scan tolerates it —
+	// one of the two spec-level reasons a trailing 0x00 is legitimate, the
+	// other being an odd root body size.
+	lastPadUncounted bool
 }
 
 // isEOFFamily reports whether err says the input ended: io.EOF or
@@ -535,7 +537,7 @@ func scan(src *source, conf readerConfig, yield func(ChunkInfo, error) bool) {
 		return
 	}
 
-	if err := p.verifyEnd(); err != nil {
+	if err := p.verifyEnd(bodyLen); err != nil {
 		yield(ChunkInfo{}, err)
 	}
 }
@@ -683,21 +685,25 @@ func (p *parser) skipBody(id FourCC, bodyOff, remaining int64) error {
 	return nil
 }
 
-// verifyEnd rejects data beyond the root chunk. When the final chunk has an odd-sized
-// body whose pad byte is not counted in the RIFF size, a single 0x00 is tolerated,
-// because writers commonly append that pad byte anyway.
-func (p *parser) verifyEnd() error {
+// verifyEnd checks what may follow the root chunk. A single 0x00 pad byte is
+// legitimate for exactly two reasons — the root's own body size is odd, so the
+// specification pads the root chunk itself, or the final chunk's pad byte was
+// left uncounted by every enclosing size — and either suffices; the two are
+// independent, so this is a union, not a proxy for one another. Beyond that
+// byte, strict reads require the end of the input.
+func (p *parser) verifyEnd(rootBodyLen int64) error {
 	if p.conf.allowTrailingData {
 		return nil
 	}
 
+	padDue := rootBodyLen%2 == 1 || p.lastPadUncounted
 	var buf [1]byte
 	switch _, err := io.ReadFull(p.src, buf[:]); {
 	case isEOFFamily(err):
 		return nil
 	case err != nil:
 		return err
-	case buf[0] != 0x00 || !p.tolerateTrailingPad:
+	case buf[0] != 0x00 || !padDue:
 		return p.syntaxError(p.src.off-1, "unexpected data after the root chunk")
 	}
 
@@ -713,14 +719,14 @@ func (p *parser) verifyEnd() error {
 // The pad byte is not counted in the chunk's own size but is counted in its parent's size,
 // so it is absent when the parent size stops right at the end of the body.
 func (p *parser) skipPadding(id FourCC, bodyLen, end int64) error {
-	p.tolerateTrailingPad = false
+	p.lastPadUncounted = false
 	if bodyLen%2 == 0 {
 		return nil
 	}
 	if p.src.off >= end {
 		// the pad byte would lie outside the parent's declared size; for the final
 		// chunk many writers append it anyway, which verifyEnd tolerates
-		p.tolerateTrailingPad = true
+		p.lastPadUncounted = true
 		return nil
 	}
 
