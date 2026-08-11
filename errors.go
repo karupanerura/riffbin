@@ -63,6 +63,11 @@ var (
 // It is reserved for defects of the input itself: an I/O failure of the
 // underlying reader is never classified as a SyntaxError — it surfaces as the
 // reader's own error, at most wrapped with context, so errors.Is matches it.
+// The one reading the readers apply everywhere: an io.EOF or
+// io.ErrUnexpectedEOF from the underlying reader means the input ended there —
+// a clean io.EOF before the first byte of the root chunk header, a SyntaxError
+// for the truncation inside the structure, and a clean end while probing for
+// data after the root chunk.
 type SyntaxError struct {
 	// Offset is the byte offset at which the problem was detected, counted
 	// from the position the reader was at when the read call was made.

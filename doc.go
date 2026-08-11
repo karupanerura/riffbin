@@ -23,16 +23,17 @@
 // The readers require the pad byte wherever the enclosing size says there is
 // room for one. Two deviations common in real files are still read without an
 // option: a final chunk whose parent size stops right at the odd body, and a
-// single 0x00 after the root chunk left by writers that append the last pad
-// byte without counting it. What the byte at a pad position means otherwise is
-// one three-valued choice, [PaddingPolicy]: [PadOmitted] reads files that omit
-// pad bytes entirely (riffbin up to v0.0.6 wrote such files, and e.g. Apple
-// CoreAudio still writes them); [PadGarbage] reads files whose pad bytes hold
-// garbage instead of zero, skipping them without inspection like the reference
-// readers do. A printable garbage pad is indistinguishable from the next
-// header of an unpadded file, so the policy declares which way that byte
-// reads — declare the deviation the input actually has; a conflicting
-// combination is not expressible.
+// single 0x00 after the root chunk wherever the specification calls for one —
+// the root's own body size is odd, or the final chunk's pad byte was left
+// uncounted by every enclosing size. What the byte at a pad position means
+// otherwise is one three-valued choice, [PaddingPolicy]: [PadOmitted] reads
+// files that omit pad bytes entirely (riffbin up to v0.0.6 wrote such files,
+// and e.g. Apple CoreAudio still writes them); [PadGarbage] reads files whose
+// pad bytes hold garbage instead of zero, skipping them without inspection
+// like the reference readers do. A printable garbage pad is indistinguishable
+// from the next header of an unpadded file, so the policy declares which way
+// that byte reads — declare the deviation the input actually has; a
+// conflicting combination is not expressible.
 //
 // # Reading
 //
@@ -62,14 +63,14 @@
 //	}
 //
 // The [PaddingPolicy] values and [AllowTrailingData] relax individual rules
-// for files that do not follow the specification. With
-// [AllowTrailingData] a call consumes
-// exactly one root chunk and leaves the input right after it, so a stream of
-// concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the 32-bit
-// size field by appending RIFF("AVIX") chunks — is read by calling [ReadAll]
-// or [ReadSections] repeatedly until io.EOF; [Concatenated] wraps that loop
-// as an iterator. A pad byte that a chunk's writer left uncounted in its RIFF
-// size is skipped before the next chunk of such a stream.
+// for files that do not follow the specification. With [AllowTrailingData] a
+// call consumes exactly one root chunk and leaves the input right after it,
+// so a stream of concatenated RIFF chunks — the layout AVI 2.0 uses to grow
+// past the 32-bit size field by appending RIFF("AVIX") chunks — is read by
+// calling [ReadAll] or [ReadSections] repeatedly until io.EOF; [Concatenated]
+// wraps that loop as an iterator. A pad byte that a chunk's writer left
+// uncounted in its RIFF size is skipped before the next chunk of such a
+// stream.
 //
 // # Writing
 //
@@ -93,11 +94,11 @@
 // writers derive it from the planned children, so a custom [GroupedChunk] cannot
 // misdeclare it; a derived size above 4 GiB fails with [ErrChunkTooLarge]. A leaf
 // body that produces a different number of bytes than it declares is only caught as
-// it is copied, failing with [ErrSizeMismatch] where the
-// write stops — the header and part of the body are already emitted; the copy never
-// runs past the declared size, so even an endless body fails right at that boundary.
-// A streaming body, which has no declared size, is capped where its tree outgrows
-// the largest possible RIFF file, failing with [ErrChunkTooLarge] as it streams.
+// it is copied, failing with [ErrSizeMismatch] where the write stops — the header
+// and part of the body are already emitted; the copy never runs past the declared
+// size, so even an endless body fails right at that boundary. A streaming body,
+// which has no declared size, is capped where its tree outgrows the largest
+// possible RIFF file, failing with [ErrChunkTooLarge] as it streams.
 //
 // Each WriteChunk call reads the tree exactly once: planning snapshots every
 // ChunkID, GroupType, Children and leaf BodySize, and captures every body
@@ -105,11 +106,11 @@
 // write pass runs from the snapshot alone and the only caller code it enters
 // is the drain of the captured readers. Sizes and offsets are measured on the
 // destination side of every copy, and what the cap and the counter record is
-// authoritative: a method answering differently once planning is over, a body's WriteTo
-// misreporting its count, or one swallowing the destination's error therefore
-// cannot desynchronize the size fields from the bytes actually written, pass
-// a failed write off as a success, or drive the writers into unbounded
-// recursion; a panic raised inside the
+// authoritative: a method answering differently once planning is over, a
+// body's WriteTo misreporting its count, or one swallowing the destination's
+// error therefore cannot desynchronize the size fields from the bytes
+// actually written, pass a failed write off as a success, or drive the
+// writers into unbounded recursion; a panic raised inside the
 // implementation's own methods still propagates. The one count taken on trust
 // is a destination's own io.ReaderFrom: where the destination provides one the
 // writers let it consume the body, and the bytes it reports are the bytes the

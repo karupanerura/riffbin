@@ -353,8 +353,8 @@ func (c *sizeOnlyMutatingSubChunk) BodySize() int64 {
 
 func (c *sizeOnlyMutatingSubChunk) Body() io.Reader { return strings.NewReader(c.body) }
 
-// sideEffectSubChunk runs effect when its body is requested — the only
-// moment the write pass calls back into caller code.
+// sideEffectSubChunk runs effect when its body is requested — during
+// planning, when the snapshot captures every body reader.
 type sideEffectSubChunk struct {
 	id      riffbin.FourCC
 	payload string
@@ -371,16 +371,17 @@ func (c *sideEffectSubChunk) Body() io.Reader {
 }
 
 // swappableStreamingChunk embeds a *StreamingSubChunk that the test swaps
-// mid-write: the stream captured at plan time must be the one drained, or
-// the duplicate and consumed checks would have judged a different stream
-// than the write uses.
+// while the snapshot is being taken: whichever stream the plan captured is
+// the one the write drains — the duplicate and consumed checks judged that
+// very stream, and nothing consults the chunk again after planning.
 type swappableStreamingChunk struct {
 	*riffbin.StreamingSubChunk
 }
 
-// The plan captures the streaming body itself, so an embedder swapping its
-// embedded chunk between planning and writing changes nothing: the stream
-// the checks saw is the stream the write drains, and the replacement stays
+// The plan captures the streaming body itself, so a swap after this chunk was
+// planned changes nothing about the write, and a swap during planning — here
+// via an earlier sibling's Body side effect — simply decides which stream the
+// snapshot sees: the one it saw is the one drained, and the other stays
 // fresh for a later write.
 func TestStreamingWriterDrainsStreamCapturedAtPlanTime(t *testing.T) {
 	t.Parallel()

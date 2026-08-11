@@ -50,13 +50,14 @@ emit it.
 
 The readers require the pad byte whenever the enclosing size says there is room for
 one. Two deviations common in real files are still read without an option: a final
-chunk whose pad byte was left uncounted, and the single trailing `0x00` such a file
-ends with. What the byte at a pad position means otherwise is one three-valued
-choice, `PaddingPolicy`: `PadOmitted` reads files that omit pad bytes entirely, and
-`PadGarbage` files whose pad bytes hold garbage instead of zero (see Example 4). A
-printable garbage pad is indistinguishable from the next header of an unpadded file,
-so the policy declares which way that byte reads — and a conflicting combination is
-not expressible.
+chunk whose pad byte was left uncounted, and the single trailing `0x00` the
+specification calls for after the root chunk — its own body size odd, or that
+uncounted final pad. What the byte at a pad position means otherwise is one
+three-valued choice, `PaddingPolicy`: `PadOmitted` reads files that omit pad bytes
+entirely, and `PadGarbage` files whose pad bytes hold garbage instead of zero (see
+Example 4). A printable garbage pad is indistinguishable from the next header of an
+unpadded file, so the policy declares which way that byte reads — and a conflicting
+combination is not expressible.
 
 # Examples
 
@@ -249,6 +250,7 @@ Input that used to be accepted silently — a nested `RIFF` chunk, a non-ASCII c
 truncated body — is now rejected. The writers validate the tree before emitting anything:
 a tree the readers would not accept fails with `ErrUnwritableChunk`, one above 4 GiB with
 `ErrChunkTooLarge`, and an already-consumed `StreamingSubChunk` — or one built over the
-same reader pointer as another chunk of the tree — with `ErrConsumedStreamingChunk`. A group's size on disk is always derived from its
-children, so a custom `GroupedChunk` misreporting `BodySize` no longer fails the
-write: the file simply carries the derived size.
+same reader pointer as another chunk of the tree — with `ErrConsumedStreamingChunk`. A group's
+size on disk is always derived from its children, so a custom `GroupedChunk`
+misreporting `BodySize` no longer fails the write: the file simply carries the
+derived size.
