@@ -14,14 +14,25 @@ import (
 
 func main() {
 	log.SetFlags(0)
-	lenient := flag.Bool("lenient", false, "accept files that omit pad bytes after odd-sized chunks or carry data after the RIFF chunk")
-	garbagePads := flag.Bool("garbage-pads", false, "accept files whose pad bytes hold garbage instead of zero or carry data after the RIFF chunk")
+	padding := flag.String("padding", "strict", "padding policy: strict, omitted (pad bytes omitted after odd-sized chunks) or garbage (pad bytes hold garbage)")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [-lenient | -garbage-pads] RIFF-file\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [-padding strict|omitted|garbage] RIFF-file\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-	if flag.NArg() != 1 || (*lenient && *garbagePads) {
+
+	var opts []riffbin.ReaderOption
+	switch *padding {
+	case "strict":
+	case "omitted":
+		opts = append(opts, riffbin.PadOmitted)
+	case "garbage":
+		opts = append(opts, riffbin.PadGarbage)
+	default:
+		flag.Usage()
+		os.Exit(2)
+	}
+	if flag.NArg() != 1 {
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -33,13 +44,6 @@ func main() {
 	}
 	defer f.Close()
 
-	var opts []riffbin.ReaderOption
-	if *lenient {
-		opts = append(opts, riffbin.AllowOmittedPadding(), riffbin.AllowTrailingData())
-	}
-	if *garbagePads {
-		opts = append(opts, riffbin.AllowGarbagePadding(), riffbin.AllowTrailingData())
-	}
 	if err := dump(f, opts); err != nil {
 		log.Fatalf("%s: %s", name, err)
 	}

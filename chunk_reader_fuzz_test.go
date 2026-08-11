@@ -135,16 +135,30 @@ func FuzzReadSections(f *testing.F) {
 	})
 }
 
+// readerModes is the complete legal option space: every padding policy, with
+// and without AllowTrailingData. Each differential test and fuzz target
+// iterates all of it, so no combination escapes the harness — a rule that
+// only runs in one mode (like the end-of-chunk probe, which AllowTrailingData
+// short-circuits) is still exercised in the modes where it runs.
+var readerModes = []struct {
+	name string
+	opts []riffbin.ReaderOption
+}{
+	{name: "strict"},
+	{name: "padOmitted", opts: []riffbin.ReaderOption{riffbin.PadOmitted}},
+	{name: "padGarbage", opts: []riffbin.ReaderOption{riffbin.PadGarbage}},
+	{name: "trailing", opts: []riffbin.ReaderOption{riffbin.AllowTrailingData()}},
+	{name: "padOmitted+trailing", opts: []riffbin.ReaderOption{riffbin.PadOmitted, riffbin.AllowTrailingData()}},
+	{name: "padGarbage+trailing", opts: []riffbin.ReaderOption{riffbin.PadGarbage, riffbin.AllowTrailingData()}},
+}
+
 func FuzzReadAllLenient(f *testing.F) {
 	for _, seed := range fuzzSeeds {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		for _, opts := range [][]riffbin.ReaderOption{
-			{riffbin.AllowOmittedPadding(), riffbin.AllowTrailingData()},
-			{riffbin.AllowGarbagePadding(), riffbin.AllowTrailingData()},
-		} {
-			c, err := riffbin.ReadAll(bytes.NewReader(b), opts...)
+		for _, mode := range readerModes {
+			c, err := riffbin.ReadAll(bytes.NewReader(b), mode.opts...)
 			if (c == nil) == (err == nil) {
 				t.Log(hex.Dump(b))
 				t.Fatal("invalid result")
@@ -194,21 +208,13 @@ func chunksFlatten(t *testing.T, r io.Reader, opts ...riffbin.ReaderOption) ([]f
 // Whatever the input, every reader must agree: the tree readers, the streaming
 // parser reading through, and the streaming parser skipping by seeking all
 // accept or all reject, and on success they yield the same chunks. This pins
-// them to a single definition of the format, in the strict and the lenient
-// mode alike.
+// them to a single definition of the format, across the entire option space.
 func FuzzReadersAgree(f *testing.F) {
 	for _, seed := range fuzzSeeds {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		for _, mode := range []struct {
-			name string
-			opts []riffbin.ReaderOption
-		}{
-			{name: "strict"},
-			{name: "lenientOmitted", opts: []riffbin.ReaderOption{riffbin.AllowOmittedPadding(), riffbin.AllowTrailingData()}},
-			{name: "lenientGarbage", opts: []riffbin.ReaderOption{riffbin.AllowGarbagePadding(), riffbin.AllowTrailingData()}},
-		} {
+		for _, mode := range readerModes {
 			full, fullErr := riffbin.ReadAll(bytes.NewReader(b), mode.opts...)
 			sections, sectionsErr := riffbin.ReadSections(bytes.NewReader(b), mode.opts...)
 			streamed, streamedErr := chunksFlatten(t, struct{ io.Reader }{bytes.NewReader(b)}, mode.opts...)

@@ -275,6 +275,7 @@ func TestWalk(t *testing.T) {
 			t.Errorf("should stop at the 5th chunk but saw %d", seen)
 		}
 	})
+
 }
 
 func TestConcatenated(t *testing.T) {
@@ -330,10 +331,13 @@ func TestConcatenated(t *testing.T) {
 	})
 }
 
-// The streaming parser accepts a superset of nothing: exactly what the tree
-// readers accept, under every combination of the reader options — the inputs
-// are chosen so that each option flips some verdict. (The fuzz target extends
-// this property to arbitrary inputs.)
+// The streaming parser accepts exactly what the tree readers accept, and
+// yields the very chunks the tree holds, under every combination of the
+// reader options — the inputs are chosen so that each option flips some
+// verdict, and the acceptance matrix below pins which. A mode that stops
+// changing verdicts, or a parser that yields the right verdict over the
+// wrong chunks, fails here. (The fuzz target extends the agreement to
+// arbitrary inputs.)
 func TestChunksAgreesWithTreeReaders(t *testing.T) {
 	t.Parallel()
 
@@ -354,26 +358,43 @@ func TestChunksAgreesWithTreeReaders(t *testing.T) {
 		},
 		// data after the root chunk
 		"trailingData": append(append([]byte{}, paddedFileBytes...), "junk"...),
-		// the uncounted pad byte of a previous concatenated chunk
+		// a stray 0x00 heading the stream: only the trailing-data modes skip
+		// it, as the uncounted pad byte of a previous concatenated chunk
 		"leadingPad": append([]byte{0x00}, paddedFileBytes...),
 	}
-	modes := map[string][]riffbin.ReaderOption{
-		"strict":         nil,
-		"omittedPadding": {riffbin.AllowOmittedPadding()},
-		"garbagePadding": {riffbin.AllowGarbagePadding()},
-		"trailingData":   {riffbin.AllowTrailingData()},
-		"lenientOmitted": {riffbin.AllowOmittedPadding(), riffbin.AllowTrailingData()},
-		"lenientGarbage": {riffbin.AllowGarbagePadding(), riffbin.AllowTrailingData()},
+	// the acceptance matrix, pinned per mode: a policy that silently stops
+	// working would flip cells here, not just both readers at once
+	accepts := map[string]map[string]bool{
+		"strict":              {"padded": true, "rifx": true, "garbage": false, "unpadded": false, "garbagePad": false, "trailingData": false, "leadingPad": false},
+		"padOmitted":          {"padded": true, "rifx": true, "garbage": false, "unpadded": true, "garbagePad": false, "trailingData": false, "leadingPad": false},
+		"padGarbage":          {"padded": true, "rifx": true, "garbage": false, "unpadded": false, "garbagePad": true, "trailingData": false, "leadingPad": false},
+		"trailing":            {"padded": true, "rifx": true, "garbage": false, "unpadded": false, "garbagePad": false, "trailingData": true, "leadingPad": true},
+		"padOmitted+trailing": {"padded": true, "rifx": true, "garbage": false, "unpadded": true, "garbagePad": false, "trailingData": true, "leadingPad": true},
+		"padGarbage+trailing": {"padded": true, "rifx": true, "garbage": false, "unpadded": false, "garbagePad": true, "trailingData": true, "leadingPad": true},
 	}
-	for mode, opts := range modes {
+
+	for _, mode := range readerModes {
+		expected, ok := accepts[mode.name]
+		if !ok {
+			t.Fatalf("no acceptance row for mode %q — extend the matrix with the new mode", mode.name)
+		}
 		for name, b := range inputs {
-			mode, opts, name, b := mode, opts, name, b
-			t.Run(mode+"/"+name, func(t *testing.T) {
+			mode, name, b := mode, name, b
+			t.Run(mode.name+"/"+name, func(t *testing.T) {
 				t.Parallel()
-				_, treeErr := riffbin.ReadAll(bytes.NewReader(b), opts...)
-				_, chunksErr := collectChunks(t, onlyReader{bytes.NewReader(b)}, opts...)
+				tree, treeErr := riffbin.ReadAll(bytes.NewReader(b), mode.opts...)
+				events, chunksErr := chunksFlatten(t, onlyReader{bytes.NewReader(b)}, mode.opts...)
+
+				if want := expected[name]; (treeErr == nil) != want {
+					t.Errorf("ReadAll should report accepted=%v but got: %v", want, treeErr)
+				}
 				if (treeErr == nil) != (chunksErr == nil) {
 					t.Errorf("the readers disagree: ReadAll=%v Chunks=%v", treeErr, chunksErr)
+				}
+				if treeErr == nil {
+					if df := cmp.Diff(flattenTree(t, tree), events); df != "" {
+						t.Errorf("Chunks disagrees on the chunks: %s", df)
+					}
 				}
 			})
 		}

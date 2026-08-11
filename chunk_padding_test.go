@@ -73,7 +73,7 @@ func TestReadAllPadding(t *testing.T) {
 	t.Run("LegacyUnpaddedFile", func(t *testing.T) {
 		// riffbin up to v0.0.6 wrote no padding byte after odd-sized chunks.
 		// Such files violate the specification, so they are rejected unless
-		// AllowOmittedPadding is given.
+		// PadOmitted is given.
 		t.Parallel()
 		legacy := []byte{
 			0x52, 0x49, 0x46, 0x46, // id (RIFF)
@@ -93,9 +93,9 @@ func TestReadAllPadding(t *testing.T) {
 				t.Errorf("should be ErrInvalidFormat but got: %v", err)
 			}
 		})
-		t.Run("AllowOmittedPadding", func(t *testing.T) {
+		t.Run("PadOmitted", func(t *testing.T) {
 			t.Parallel()
-			got, err := riffbin.ReadAll(bytes.NewReader(legacy), riffbin.AllowOmittedPadding())
+			got, err := riffbin.ReadAll(bytes.NewReader(legacy), riffbin.PadOmitted)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -103,9 +103,9 @@ func TestReadAllPadding(t *testing.T) {
 				t.Errorf("diff = %s", df)
 			}
 		})
-		t.Run("AllowOmittedPaddingSections", func(t *testing.T) {
+		t.Run("PadOmittedSections", func(t *testing.T) {
 			t.Parallel()
-			got, err := riffbin.ReadSections(bytes.NewReader(legacy), riffbin.AllowOmittedPadding())
+			got, err := riffbin.ReadSections(bytes.NewReader(legacy), riffbin.PadOmitted)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -113,12 +113,12 @@ func TestReadAllPadding(t *testing.T) {
 				t.Fatalf("should have 2 sub-chunks but got: %d", len(got.Payload))
 			}
 		})
-		t.Run("AllowGarbagePadding", func(t *testing.T) {
+		t.Run("PadGarbage", func(t *testing.T) {
 			// the garbage policy skips the byte at the pad position, which here
 			// heads the next chunk header: this omission stays an error — see
 			// TestOmittedPadIsAmbiguous for one that reads as a different tree
 			t.Parallel()
-			if _, err := riffbin.ReadAll(bytes.NewReader(legacy), riffbin.AllowGarbagePadding()); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			if _, err := riffbin.ReadAll(bytes.NewReader(legacy), riffbin.PadGarbage); !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("should be ErrInvalidFormat but got: %v", err)
 			}
 		})
@@ -163,14 +163,14 @@ func TestReadAllPadding(t *testing.T) {
 			if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("strict should be ErrInvalidFormat but got: %v", err)
 			}
-			got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowOmittedPadding())
+			got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.PadOmitted)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if df := cmp.Diff(expected, got); df != "" {
 				t.Errorf("diff = %s", df)
 			}
-			sections, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowOmittedPadding())
+			sections, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.PadOmitted)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -213,14 +213,14 @@ func TestReadAllPadding(t *testing.T) {
 			if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("strict should be ErrInvalidFormat but got: %v", err)
 			}
-			got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowOmittedPadding())
+			got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.PadOmitted)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if df := cmp.Diff(expected, got); df != "" {
 				t.Errorf("diff = %s", df)
 			}
-			sections, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowOmittedPadding())
+			sections, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.PadOmitted)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -322,12 +322,12 @@ func TestReadAllPadding(t *testing.T) {
 
 		// under the omitted-padding policy a printable byte heads the next chunk
 		// header, and no complete header follows it here: the file stays unreadable
-		if _, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowOmittedPadding()); !errors.Is(err, riffbin.ErrInvalidFormat) {
-			t.Errorf("AllowOmittedPadding should still fail but got: %v", err)
+		if _, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.PadOmitted); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			t.Errorf("PadOmitted should still fail but got: %v", err)
 		}
 
 		// under the garbage-padding policy the byte is the pad byte, holding 'A'
-		got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowGarbagePadding())
+		got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.PadGarbage)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -339,7 +339,7 @@ func TestReadAllPadding(t *testing.T) {
 		// a pad byte holding garbage instead of 0x00. the specification requires the
 		// writer to emit zero, so the strict mode reports it; the reference
 		// implementations (x/image/riff, ffmpeg, libwebp) never inspect the pad value,
-		// which is the behavior AllowGarbagePadding opts into.
+		// which is the behavior PadGarbage opts into.
 		t.Parallel()
 		b := []byte{
 			0x52, 0x49, 0x46, 0x46, // id (RIFF)
@@ -360,9 +360,9 @@ func TestReadAllPadding(t *testing.T) {
 				t.Errorf("should be ErrInvalidFormat but got: %v", err)
 			}
 		})
-		t.Run("AllowGarbagePadding", func(t *testing.T) {
+		t.Run("PadGarbage", func(t *testing.T) {
 			t.Parallel()
-			got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowGarbagePadding())
+			got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.PadGarbage)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -370,9 +370,9 @@ func TestReadAllPadding(t *testing.T) {
 				t.Errorf("diff = %s", df)
 			}
 		})
-		t.Run("AllowGarbagePaddingSections", func(t *testing.T) {
+		t.Run("PadGarbageSections", func(t *testing.T) {
 			t.Parallel()
-			got, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.AllowGarbagePadding())
+			got, err := riffbin.ReadSections(bytes.NewReader(b), riffbin.PadGarbage)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -380,11 +380,11 @@ func TestReadAllPadding(t *testing.T) {
 				t.Errorf("diff = %s", df)
 			}
 		})
-		t.Run("AllowOmittedPadding", func(t *testing.T) {
+		t.Run("PadOmitted", func(t *testing.T) {
 			// 0xFF is outside printable ASCII, so it cannot head a chunk header of
 			// an unpadded file: under the omitted-padding policy it stays an error
 			t.Parallel()
-			if _, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowOmittedPadding()); !errors.Is(err, riffbin.ErrInvalidFormat) {
+			if _, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.PadOmitted); !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("should be ErrInvalidFormat but got: %v", err)
 			}
 		})
@@ -498,9 +498,9 @@ func TestPrintableGarbagePadIsAmbiguous(t *testing.T) {
 			t.Errorf("should be ErrInvalidFormat but got: %v", err)
 		}
 	})
-	t.Run("AllowGarbagePadding", func(t *testing.T) {
+	t.Run("PadGarbage", func(t *testing.T) {
 		t.Parallel()
-		got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowGarbagePadding())
+		got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.PadGarbage)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -508,10 +508,10 @@ func TestPrintableGarbagePadIsAmbiguous(t *testing.T) {
 			t.Errorf("diff = %s", df)
 		}
 	})
-	t.Run("AllowOmittedPadding", func(t *testing.T) {
+	t.Run("PadOmitted", func(t *testing.T) {
 		// the documented sharp edge: declared as unpadded, the file reads as one
 		t.Parallel()
-		got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowOmittedPadding())
+		got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.PadOmitted)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -551,9 +551,9 @@ func TestOmittedPadIsAmbiguous(t *testing.T) {
 			t.Errorf("should be ErrInvalidFormat but got: %v", err)
 		}
 	})
-	t.Run("AllowOmittedPadding", func(t *testing.T) {
+	t.Run("PadOmitted", func(t *testing.T) {
 		t.Parallel()
-		got, err := riffbin.ReadAll(bytes.NewReader(ambiguousUnpaddedFile), riffbin.AllowOmittedPadding())
+		got, err := riffbin.ReadAll(bytes.NewReader(ambiguousUnpaddedFile), riffbin.PadOmitted)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -561,11 +561,11 @@ func TestOmittedPadIsAmbiguous(t *testing.T) {
 			t.Errorf("diff = %s", df)
 		}
 	})
-	t.Run("AllowGarbagePadding", func(t *testing.T) {
+	t.Run("PadGarbage", func(t *testing.T) {
 		// the documented sharp edge: declared as garbage-padded, the unpadded
 		// file reads as a different tree
 		t.Parallel()
-		got, err := riffbin.ReadAll(bytes.NewReader(ambiguousUnpaddedFile), riffbin.AllowGarbagePadding())
+		got, err := riffbin.ReadAll(bytes.NewReader(ambiguousUnpaddedFile), riffbin.PadGarbage)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -575,38 +575,12 @@ func TestOmittedPadIsAmbiguous(t *testing.T) {
 	})
 }
 
-// The pad-position policies resolve the same byte in conflicting ways, so
-// combining them is refused — as caller misuse, not as an input defect.
-func TestConflictingPaddingOptions(t *testing.T) {
-	t.Parallel()
-
-	opts := []riffbin.ReaderOption{riffbin.AllowOmittedPadding(), riffbin.AllowGarbagePadding()}
-	for name, read := range map[string]func() error{
-		"ReadAll":      func() error { _, err := riffbin.ReadAll(bytes.NewReader(paddedFileBytes), opts...); return err },
-		"ReadSections": func() error { _, err := riffbin.ReadSections(bytes.NewReader(paddedFileBytes), opts...); return err },
-		"Chunks": func() error {
-			for _, err := range riffbin.Chunks(bytes.NewReader(paddedFileBytes), opts...) {
-				if err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-	} {
-		name, read := name, read
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			err := read()
-			if !errors.Is(err, riffbin.ErrConflictingOptions) {
-				t.Errorf("should be ErrConflictingOptions but got: %v", err)
-			}
-			if errors.Is(err, riffbin.ErrInvalidFormat) {
-				t.Error("caller misuse must not be classified as a format error")
-			}
-		})
-	}
-}
-
+// A single 0x00 after the root chunk is legitimate for two independent
+// spec-level reasons: the root's own body size is odd — the specification pads
+// every odd-sized chunk, the root included — or the final chunk's pad byte was
+// left uncounted by every enclosing size. Either alone must suffice, whatever
+// the order of the chunks: acceptance must not depend on which child happens
+// to come last.
 func TestReadSectionsPadding(t *testing.T) {
 	t.Parallel()
 

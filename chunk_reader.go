@@ -22,14 +22,64 @@ type ReadSeekerAt interface {
 	io.ReaderAt
 }
 
+// PaddingPolicy decides what the byte at a pad position means. The
+// specification requires an odd-sized chunk body to be followed by one 0x00
+// pad byte; real-world writers deviate in two mutually exclusive ways, so the
+// policy is a single three-valued choice rather than independent flags — a
+// conflicting combination is unrepresentable.
+//
+// A PaddingPolicy is itself a ReaderOption: pass PadOmitted or PadGarbage to
+// a reader directly. The zero value PadStrict is the default.
+type PaddingPolicy uint8
+
+const (
+	// PadStrict is the specification: an odd-sized chunk body is followed by
+	// exactly one 0x00 pad byte. It is the default.
+	PadStrict PaddingPolicy = iota
+
+	// PadOmitted reads files whose writers omit the pad byte after an
+	// odd-sized chunk body entirely — riffbin up to v0.0.6 wrote such files,
+	// and e.g. Apple CoreAudio still does. Where the enclosing size leaves
+	// room for a pad byte, 0x00 is read as the pad byte and printable ASCII
+	// as the first byte of the next chunk header; any other value stays an
+	// error. A padded file whose pad byte holds printable garbage is
+	// indistinguishable from an unpadded file by construction and reads as
+	// one — declare only the deviation the input actually has.
+	PadOmitted
+
+	// PadGarbage reads files whose pad bytes hold garbage instead of the zero
+	// the specification requires: the byte at a pad position is skipped
+	// without inspecting its value, as the reference readers do
+	// (x/image/riff, ffmpeg, libwebp). On a file that omits pad bytes the
+	// skip eats the first byte of the next chunk header instead — usually an
+	// error, but the shifted bytes can also read as a different, complete
+	// tree — declare only the deviation the input actually has.
+	PadGarbage
+)
+
+var _ ReaderOption = PadStrict
+
+func (p PaddingPolicy) apply(c *readerConfig) { c.padding = p }
+
+// String names the policy: "strict", "omitted" or "garbage".
+func (p PaddingPolicy) String() string {
+	switch p {
+	case PadOmitted:
+		return "omitted"
+	case PadGarbage:
+		return "garbage"
+	}
+	return "strict"
+}
+
 type readerConfig struct {
-	allowOmittedPadding bool
-	allowGarbagePadding bool
-	allowTrailingData   bool
+	padding           PaddingPolicy
+	allowTrailingData bool
 }
 
 // ReaderOption relaxes a rule of the RIFF specification for the readers.
-// Without any option they are strict.
+// Without any option they are strict. The options are the PaddingPolicy
+// values and AllowTrailingData.
 type ReaderOption interface {
 	apply(*readerConfig)
 }
@@ -37,31 +87,6 @@ type ReaderOption interface {
 type readerOptionFunc func(*readerConfig)
 
 func (f readerOptionFunc) apply(c *readerConfig) { f(c) }
-
-// AllowOmittedPadding reads files whose writers omit the pad byte after an
-// odd-sized chunk body entirely — riffbin up to v0.0.6 wrote such files, and
-// e.g. Apple CoreAudio still does. Where the enclosing size leaves room for a
-// pad byte, 0x00 is read as the pad byte and printable ASCII as the first
-// byte of the next chunk header; any other value stays an error. A padded
-// file whose pad byte holds printable garbage is indistinguishable from an
-// unpadded file by construction and reads as one — declare only the deviation
-// the input actually has. Combining it with AllowGarbagePadding, which
-// resolves the same byte the other way, is ErrConflictingOptions.
-func AllowOmittedPadding() ReaderOption {
-	return readerOptionFunc(func(c *readerConfig) { c.allowOmittedPadding = true })
-}
-
-// AllowGarbagePadding reads files whose pad bytes hold garbage instead of the
-// zero the specification requires: the byte at a pad position is skipped
-// without inspecting its value, as the reference readers do (x/image/riff,
-// ffmpeg, libwebp). On a file that omits pad bytes the skip eats the first
-// byte of the next chunk header instead — usually an error, but the shifted
-// bytes can also read as a different, complete tree — declare only the
-// deviation the input actually has. Combining it with AllowOmittedPadding,
-// which resolves the same byte the other way, is ErrConflictingOptions.
-func AllowGarbagePadding() ReaderOption {
-	return readerOptionFunc(func(c *readerConfig) { c.allowGarbagePadding = true })
-}
 
 // AllowTrailingData ignores any bytes that follow the RIFF chunk instead of rejecting
 // them: the call consumes exactly the root chunk and leaves the input right after it,
@@ -72,6 +97,14 @@ func AllowGarbagePadding() ReaderOption {
 // the input, after an odd-sized final chunk.
 func AllowTrailingData() ReaderOption {
 	return readerOptionFunc(func(c *readerConfig) { c.allowTrailingData = true })
+}
+
+func resolveOptions(opts []ReaderOption) readerConfig {
+	var c readerConfig
+	for _, o := range opts {
+		o.apply(&c)
+	}
+	return c
 }
 
 // ChunkInfo describes one chunk encountered by Chunks.
@@ -348,14 +381,7 @@ type parser struct {
 // each rule of the format lives here exactly once. It stops when yield reports
 // false; any failure is the final yield, and none may follow it.
 func scan(r io.Reader, pr ReadSeekerAt, limit int64, opts []ReaderOption, yield func(ChunkInfo, error) bool) {
-	p := &parser{src: &offsetReader{r: r}, pr: pr, limit: limit}
-	for _, o := range opts {
-		o.apply(&p.conf)
-	}
-	if p.conf.allowOmittedPadding && p.conf.allowGarbagePadding {
-		yield(ChunkInfo{}, fmt.Errorf("%w: AllowOmittedPadding and AllowGarbagePadding resolve the byte at a pad position in conflicting ways", ErrConflictingOptions))
-		return
-	}
+	p := &parser{src: &offsetReader{r: r}, pr: pr, limit: limit, conf: resolveOptions(opts)}
 
 	// read the root header. a clean end of input before its first byte is io.EOF,
 	// not a syntax error, so that a stream of concatenated RIFF chunks can be read
@@ -624,20 +650,18 @@ func (p *parser) skipPadding(id FourCC, bodyLen, end int64) error {
 	if err := p.readFull(buf[:], "an alignment pad byte"); err != nil {
 		return err
 	}
-	if buf[0] == 0x00 {
-		return nil
-	}
-	if p.conf.allowGarbagePadding {
+	switch {
+	case buf[0] == 0x00:
+	case p.conf.padding == PadGarbage:
 		// a pad byte holding garbage; the reference readers never inspect the value
-		return nil
-	}
-	if p.conf.allowOmittedPadding && printableASCII(buf[0]) {
+	case p.conf.padding == PadOmitted && printableASCII(buf[0]):
 		// chunk IDs are printable ASCII, so in a file whose writer omitted the
 		// pad byte, this byte heads the next chunk header
 		p.pending, p.pendingByte = true, buf[0]
-		return nil
+	default:
+		return p.syntaxError(off, "pad byte after the odd-sized %s chunk is %#02x, want 0x00", id, buf[0])
 	}
-	return p.syntaxError(off, "pad byte after the odd-sized %s chunk is %#02x, want 0x00", id, buf[0])
+	return nil
 }
 
 func (p *parser) readFull(buf []byte, what string) error {

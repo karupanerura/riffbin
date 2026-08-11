@@ -106,10 +106,10 @@ func Example_leniency() {
 
 	// accept omitted pad bytes after odd-sized chunks (riffbin <= v0.0.6 wrote such
 	// files, and e.g. Apple CoreAudio still writes them)
-	riffChunk, err := riffbin.ReadAll(r, riffbin.AllowOmittedPadding())
+	riffChunk, err := riffbin.ReadAll(r, riffbin.PadOmitted)
 
 	// accept pad bytes holding garbage instead of zero
-	riffChunk, err = riffbin.ReadAll(r, riffbin.AllowGarbagePadding())
+	riffChunk, err = riffbin.ReadAll(r, riffbin.PadGarbage)
 
 	// ignore whatever follows the RIFF chunk
 	riffChunk, err = riffbin.ReadAll(r, riffbin.AllowTrailingData())
