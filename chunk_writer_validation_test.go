@@ -290,14 +290,19 @@ func TestStreamingWriterConsecutiveWrites(t *testing.T) {
 func TestStreamingWriterReportsFirstPassError(t *testing.T) {
 	t.Parallel()
 
+	passErr := errors.New("injected write failure")
 	m := &memWriteSeeker{}
-	m.failWrite = func(pos int64) error { return errors.New("injected write failure") }
+	m.failWrite = func(pos int64) error { return passErr }
 	w, err := riffbin.NewStreamingWriter(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = w.WriteChunk(buildStreamingTree("abc")); err == nil {
-		t.Fatal("the write failure should be reported")
+	n, err := w.WriteChunk(buildStreamingTree("abc"))
+	if !errors.Is(err, passErr) {
+		t.Fatalf("the write failure should surface but got: %v", err)
+	}
+	if n != 0 || len(m.buf) != 0 {
+		t.Errorf("n = %d and %d byte(s) written; the very first write failed", n, len(m.buf))
 	}
 }
 
@@ -307,13 +312,18 @@ func TestStreamingWriterReportsFirstPassError(t *testing.T) {
 func TestStreamingWriterReportsBackfillError(t *testing.T) {
 	t.Parallel()
 
+	// the tree of buildStreamingTree("abc") encodes to 24 bytes: the root
+	// header and type, the sub-chunk header, "abc" and its pad byte
+	const firstPassLen = 24
+
 	t.Run("Seek", func(t *testing.T) {
 		t.Parallel()
+		backfillErr := errors.New("injected write failure")
 		m := &memWriteSeeker{}
 		// the first pass only appends; every overwrite is a backfill write
 		m.failWrite = func(pos int64) error {
 			if pos < int64(len(m.buf)) {
-				return errors.New("injected write failure")
+				return backfillErr
 			}
 			return nil
 		}
@@ -321,8 +331,14 @@ func TestStreamingWriterReportsBackfillError(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = w.WriteChunk(buildStreamingTree("abc")); err == nil {
-			t.Fatal("the backfill failure should be reported")
+		n, err := w.WriteChunk(buildStreamingTree("abc"))
+		if !errors.Is(err, backfillErr) {
+			t.Fatalf("the backfill failure should surface but got: %v", err)
+		}
+		// the first pass completed: n reports its bytes even though the size
+		// fields still hold placeholders
+		if n != firstPassLen || len(m.buf) != firstPassLen {
+			t.Errorf("n = %d and %d byte(s) written, want the complete %d byte first pass", n, len(m.buf), firstPassLen)
 		}
 	})
 	t.Run("WriterAt", func(t *testing.T) {
@@ -332,8 +348,12 @@ func TestStreamingWriterReportsBackfillError(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = w.WriteChunk(buildStreamingTree("abc")); err == nil {
+		n, err := w.WriteChunk(buildStreamingTree("abc"))
+		if err == nil {
 			t.Fatal("the backfill failure should be reported")
+		}
+		if n != firstPassLen || len(m.buf) != firstPassLen {
+			t.Errorf("n = %d and %d byte(s) written, want the complete %d byte first pass", n, len(m.buf), firstPassLen)
 		}
 	})
 }
@@ -781,6 +801,49 @@ func TestWriterRejectsNilBody(t *testing.T) {
 	}
 	if n != 0 || buf.Len() != 0 {
 		t.Errorf("wrote %d byte(s) before failing", buf.Len())
+	}
+}
+
+// swallowingWriteToReader writes its payload through a WriteTo that discards
+// the destination's error — the shape that defeats an error-propagation check.
+type swallowingWriteToReader struct {
+	data string
+}
+
+func (r *swallowingWriteToReader) Read(p []byte) (int, error) { return 0, io.EOF }
+
+func (r *swallowingWriteToReader) WriteTo(w io.Writer) (int64, error) {
+	n, _ := io.WriteString(w, r.data) // the destination's error is dropped
+	return int64(n), nil
+}
+
+// A destination failure swallowed by a streaming body's own WriteTo must still
+// fail the write: the latched destination error is authoritative, so a
+// truncated file cannot pass as a success.
+func TestStreamingWriterReportsSwallowedSinkError(t *testing.T) {
+	t.Parallel()
+
+	sinkErr := errors.New("injected sink failure")
+	m := &memWriteSeeker{}
+	m.failWrite = func(pos int64) error {
+		if pos >= 20 { // accept the 20 header bytes, fail the body copy itself
+			return sinkErr
+		}
+		return nil
+	}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"),
+				&swallowingWriteToReader{data: "0123456789abcdef"}),
+		},
+	})
+	if !errors.Is(err, sinkErr) {
+		t.Errorf("the sink's error should surface but got: %v", err)
 	}
 }
 

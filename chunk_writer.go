@@ -39,6 +39,11 @@ func (w *Writer) WriteChunk(c *RIFFChunk) (int64, error) {
 	}
 	cnt := &countingWriter{w: w.w}
 	err = writePlan(cnt, &plan, order, cnt, nil)
+	if err == nil {
+		// an error of the destination that a body's own WriteTo swallowed:
+		// the wrapper latched it, so a failed write cannot pass as a success
+		err = cnt.firstErr
+	}
 	return cnt.n, err
 }
 
@@ -90,6 +95,9 @@ func (w *StreamingWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
 	var fixes []sizeFix
 	err = writePlan(&cappedWriter{w: cnt, remaining: HeaderBytes + MaxBodySize, sentinel: errFileBoundExceeded}, &plan, order, cnt, &fixes)
 	n = cnt.n
+	if err == nil {
+		err = cnt.firstErr
+	}
 	if err != nil {
 		if errors.Is(err, errFileBoundExceeded) {
 			err = fmt.Errorf("%w: %w", ErrChunkTooLarge, err)
@@ -418,18 +426,23 @@ var (
 	errFileBoundExceeded    = errors.New("output crossed the RIFF file size bound")
 )
 
-// countingWriter counts the bytes its underlying writer accepted. It is the
-// measurement the writers trust: io.Copy hands the copy to the source's own
-// WriteTo when it has one, and the count that call returns is the source's
-// claim — the bytes that actually passed through here are not.
+// countingWriter counts the bytes its underlying writer accepted, and latches
+// the first error the writer returned. It is the measurement the writers
+// trust: io.Copy hands the copy to the source's own WriteTo when it has one,
+// and both the count that call returns and the error it chooses to propagate
+// are the source's claims — the record kept here is not.
 type countingWriter struct {
-	w io.Writer
-	n int64
+	w        io.Writer
+	n        int64
+	firstErr error
 }
 
 func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	cw.n += int64(n)
+	if err != nil && cw.firstErr == nil {
+		cw.firstErr = err
+	}
 	return n, err
 }
 

@@ -250,6 +250,11 @@ func (c *streamingChunkBody) WriteTo(w io.Writer) (n int64, err error) {
 	cw := countingWriter{w: w}
 	_, err = io.Copy(&cw, c.reader)
 	c.readLength += cw.n
+	if err == nil {
+		// the destination's error is authoritative too: a reader's own
+		// WriteTo may swallow it, but the wrapper latched the first one
+		err = cw.firstErr
+	}
 	return cw.n, err
 }
 
