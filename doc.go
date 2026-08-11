@@ -84,7 +84,8 @@
 // or a type embedding one — and is sized from the bytes its stream actually
 // produces, never from what it reports. Before the first byte is written, the tree is
 // checked against what the readers accept: a non-ASCII FourCC, a sub-chunk using a
-// structural ID such as "LIST", a nested RIFF chunk or nesting too deep to read back
+// structural ID such as "LIST", a nested RIFF chunk, nesting too deep to read back,
+// a sub-chunk whose Body is nil or a streaming sub-chunk built over a nil reader
 // fails with [ErrUnwritableChunk], and a streaming sub-chunk whose stream was already
 // consumed — or one placed twice in the tree, which would find it consumed — fails
 // with [ErrConsumedStreamingChunk]. A group's size is never asked of the tree: the
@@ -97,12 +98,12 @@
 // A streaming body, which has no declared size, is capped where its tree outgrows
 // the largest possible RIFF file, failing with [ErrChunkTooLarge] as it streams.
 //
-// Each WriteChunk call reads the tree exactly once: the check above snapshots
-// every ChunkID, GroupType, Children and BodySize, and the write pass works
-// from the snapshot alone, calling back into the tree only for [SubChunk.Body]
-// on each non-streaming leaf — a copy bounded by the snapshotted size — and to
-// drain the streaming bodies captured with it. Sizes and offsets are measured
-// on the destination side of every copy. A method answering differently once
+// Each WriteChunk call reads the tree exactly once: planning snapshots every
+// ChunkID, GroupType, Children and leaf BodySize, and captures every body
+// reader — [SubChunk.Body] is called once per leaf, during planning — so the
+// write pass runs from the snapshot alone and the only caller code it enters
+// is the drain of the captured readers. Sizes and offsets are measured on the
+// destination side of every copy. A method answering differently once
 // planning is over, or a body's WriteTo misreporting its count, therefore
 // cannot desynchronize the size fields from the bytes actually written or
 // drive the writers into unbounded recursion; a panic raised inside the

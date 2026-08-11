@@ -92,7 +92,9 @@ type GroupedChunk interface {
 type SubChunk interface {
 	Chunk
 
-	// Body returns a reader over the chunk payload.
+	// Body returns a reader over the chunk payload. The writers call it once
+	// per WriteChunk, while planning the write; a nil reader is rejected
+	// there with ErrUnwritableChunk, before anything is written.
 	//
 	// A sub-chunk returns an independent reader on every call, so it can be
 	// written more than once. A *StreamingSubChunk returns its underlying
@@ -187,7 +189,9 @@ var _ SubChunk = (*StreamingSubChunk)(nil)
 
 // NewStreamingSubChunk returns a sub-chunk that streams its payload from r.
 // The length of r does not have to be known in advance: StreamingWriter
-// writes the payload through and fixes the size fields afterwards.
+// writes the payload through and fixes the size fields afterwards. A chunk
+// built over a nil r is rejected by the writers with ErrUnwritableChunk,
+// before anything is written.
 func NewStreamingSubChunk(id FourCC, r io.Reader) *StreamingSubChunk {
 	return &StreamingSubChunk{id: id, body: streamingChunkBody{reader: r}}
 }

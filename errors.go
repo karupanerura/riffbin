@@ -42,8 +42,10 @@ var (
 
 	// ErrUnwritableChunk is returned when a chunk tree cannot be written as a RIFF file that the
 	// readers would accept: a FourCC that is not printable ASCII, a sub-chunk whose ID is a
-	// structural ID such as "LIST", a grouped chunk below the root that is not a LIST, or
-	// chunks nested deeper than the readers read back.
+	// structural ID such as "LIST", a grouped chunk below the root that is not a LIST,
+	// chunks nested deeper than the readers read back, a sub-chunk whose Body is nil, or
+	// a streaming sub-chunk built over a nil reader. Every case is caught while planning
+	// the write, before a single byte reaches the output.
 	ErrUnwritableChunk = errors.New("riffbin: unwritable chunk")
 
 	// ErrConsumedStreamingChunk is returned when a streaming sub-chunk is written after its

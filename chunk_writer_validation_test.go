@@ -446,6 +446,56 @@ func TestWriterDerivesGroupSize(t *testing.T) {
 	check(t, list, m.buf)
 }
 
+// A streaming sub-chunk built over a nil reader fails while planning, as a
+// typed error before the first byte — never as a panic after the headers are
+// already in the output.
+func TestStreamingWriterRejectsNilReader(t *testing.T) {
+	t.Parallel()
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), nil),
+		},
+	})
+	if !errors.Is(err, riffbin.ErrUnwritableChunk) {
+		t.Errorf("should be ErrUnwritableChunk but got: %v", err)
+	}
+	if n != 0 || len(m.buf) != 0 {
+		t.Errorf("wrote %d byte(s) before failing", len(m.buf))
+	}
+}
+
+// nilBodySubChunk answers Body with nil — a broken custom SubChunk.
+type nilBodySubChunk struct{}
+
+func (nilBodySubChunk) ChunkID() riffbin.FourCC { return riffbin.MustParseFourCC("DAT1") }
+func (nilBodySubChunk) BodySize() int64         { return 0 }
+func (nilBodySubChunk) Body() io.Reader         { return nil }
+
+// A sub-chunk whose Body is nil fails while planning, like every other defect
+// the plan can see — not as a nil dereference inside the copy.
+func TestWriterRejectsNilBody(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	n, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{nilBodySubChunk{}},
+	})
+	if !errors.Is(err, riffbin.ErrUnwritableChunk) {
+		t.Errorf("should be ErrUnwritableChunk but got: %v", err)
+	}
+	if n != 0 || buf.Len() != 0 {
+		t.Errorf("wrote %d byte(s) before failing", buf.Len())
+	}
+}
+
 // The same streaming sub-chunk placed twice in one tree would drain its stream
 // at the first occurrence and write a lying header at the second; the tree is
 // rejected before the first byte, like every defect that is checkable up front.

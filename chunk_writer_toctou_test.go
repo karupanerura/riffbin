@@ -397,6 +397,8 @@ func TestStreamingWriterDrainsStreamCapturedAtPlanTime(t *testing.T) {
 	if _, err = w.WriteChunk(&riffbin.RIFFChunk{
 		FormType: riffbin.MustParseFourCC("TEST"),
 		Payload: []riffbin.Chunk{
+			// planning captures this body first, and the side effect swaps the
+			// sibling before it is planned: the snapshot sees the replacement
 			&sideEffectSubChunk{id: riffbin.MustParseFourCC("ENT1"), payload: "xx", effect: func() {
 				swapper.StreamingSubChunk = replacement
 			}},
@@ -414,14 +416,52 @@ func TestStreamingWriterDrainsStreamCapturedAtPlanTime(t *testing.T) {
 		FormType: riffbin.MustParseFourCC("TEST"),
 		Payload: []riffbin.Chunk{
 			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT1"), Payload: []byte("xx")},
-			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT2"), Payload: []byte("original")},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT2"), Payload: []byte("replacement")},
 		},
 	})
 	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
 		t.Errorf("diff = %s", df)
 	}
-	if got := replacement.BodySize(); got != 0 {
-		t.Errorf("the replacement stream was consumed: BodySize() = %d, want 0", got)
+	if got := original.BodySize(); got != 0 {
+		t.Errorf("the un-captured stream was consumed: BodySize() = %d, want 0", got)
+	}
+
+	// a swap after planning is invisible: the captured stream is drained even
+	// though the chunk now presents the other one
+	late := riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT2"), strings.NewReader("late"))
+	swapper2 := &swappableStreamingChunk{StreamingSubChunk: original}
+	m2 := &memWriteSeeker{}
+	w2, err := riffbin.NewStreamingWriter(m2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w2.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			swapper2,
+			&sideEffectSubChunk{id: riffbin.MustParseFourCC("ENT1"), payload: "xx", effect: func() {
+				swapper2.StreamingSubChunk = late
+			}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got2, err := riffbin.ReadAll(bytes.NewReader(m2.buf))
+	if err != nil {
+		t.Fatalf("the written file does not parse: %v", err)
+	}
+	expected2 := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT2"), Payload: []byte("original")},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT1"), Payload: []byte("xx")},
+		},
+	})
+	if df := cmp.Diff(expected2, flattenTree(t, got2)); df != "" {
+		t.Errorf("diff = %s", df)
+	}
+	if got := late.BodySize(); got != 0 {
+		t.Errorf("the late replacement was consumed: BodySize() = %d, want 0", got)
 	}
 }
 

@@ -140,11 +140,10 @@ type sizeFix struct {
 
 // planChunk is the writers' snapshot of one chunk: every fact a write needs,
 // read from the tree exactly once and owned by the library. The write pass
-// consults only the plan, so ids, sizes, structure and recursion depth cannot
-// change under it, whatever the tree's methods return once planning is over.
-// The only calls back into caller code after planning are Body() on a
-// non-streaming leaf — bounded by the planned size — and the drain of a
-// captured streaming body.
+// consults only the plan — ids, sizes, structure, recursion depth and the
+// body readers are all captured during planning — so nothing the tree's
+// methods answer once planning is over can change what is written. The only
+// caller code running after planning is the drain of the captured readers.
 type planChunk struct {
 	id        FourCC
 	isGroup   bool
@@ -158,8 +157,8 @@ type planChunk struct {
 	// with the bytes the write pass emits below it.
 	declared uint32
 
-	src    SubChunk            // non-streaming leaves: the Body() source
-	stream *streamingChunkBody // streaming leaves: the stream captured at plan time
+	srcBody io.Reader           // non-streaming leaves: the body captured at plan time
+	stream  *streamingChunkBody // streaming leaves: the stream captured at plan time
 }
 
 // buildPlan checks, before a single byte is written, that the tree can be
@@ -245,6 +244,9 @@ func planTree(c Chunk, root, allowStreaming bool, depth int, streamed map[*strea
 				return ErrUnexpectedStreamingChunk
 			}
 			body := sc.streamingBody()
+			if body.reader == nil {
+				return fmt.Errorf("%w: chunk[%q] streams from a nil reader", ErrUnwritableChunk, p.id)
+			}
 			if body.consumed {
 				return fmt.Errorf("%w: chunk[%q] stream was already consumed after producing %d byte(s)", ErrConsumedStreamingChunk, p.id, body.readLength)
 			}
@@ -257,10 +259,15 @@ func planTree(c Chunk, root, allowStreaming bool, depth int, streamed map[*strea
 			// the backfill sizes the chunk from the bytes its stream produces
 			return nil
 		}
-		p.src = cc
 		p.declared, err = clampBodySize(p.id, cc.BodySize())
 		if err != nil {
 			return err
+		}
+		// the body reader is captured here, completing the snapshot: a nil
+		// body fails before the first byte instead of panicking mid-write
+		p.srcBody = cc.Body()
+		if p.srcBody == nil {
+			return fmt.Errorf("%w: chunk[%q] Body() returned nil", ErrUnwritableChunk, p.id)
 		}
 	default:
 		return unsupportedChunkTypeError(c)
@@ -377,7 +384,7 @@ func writeChunkBodySizeAt(w io.WriterAt, order binary.ByteOrder, b uint32, off i
 func writePlanLeafBody(w io.Writer, p *planChunk) error {
 	want := int64(p.declared)
 	cw := &cappedWriter{w: w, remaining: want, sentinel: errDeclaredSizeExceeded}
-	if _, err := io.Copy(cw, p.src.Body()); err != nil {
+	if _, err := io.Copy(cw, p.srcBody); err != nil {
 		if errors.Is(err, errDeclaredSizeExceeded) {
 			return fmt.Errorf("%w: chunk[%q] declares %d byte(s) but its body produced more", ErrSizeMismatch, p.id, want)
 		}
