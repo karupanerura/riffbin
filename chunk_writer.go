@@ -69,7 +69,8 @@ func NewStreamingWriter(w io.WriteSeeker) (*StreamingWriter, error) {
 }
 
 // WriteChunk writes the RIFF chunk tree to the underlying data stream, then seeks back
-// and re-writes every chunk size field once the streaming bodies have been consumed.
+// and re-writes the chunk size fields the first pass could not know — those of the
+// streaming chunks and their ancestors — once the streaming bodies have been consumed.
 // It returns the number of bytes written and any error encountered that caused the write to stop early.
 func (w *StreamingWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
 	plan, order, err := buildPlan(c, true)
@@ -148,6 +149,8 @@ func (w *StreamingWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
 // sizeFix records where a chunk's four-byte size field sits — relative to the
 // start of the tree being written — and the size its body actually encoded to.
 // The backfill rewrites these facts; it re-derives nothing from the tree.
+// A chunk whose first-pass header already carries its final size records no
+// fix: only the streaming chunks and their ancestors are rewritten.
 type sizeFix struct {
 	fieldOff int64
 	bodySize uint32
@@ -308,8 +311,8 @@ var paddingByte = [1]byte{0x00}
 // size and offset is derived from: it counts the bytes the destination
 // accepted since the start of the tree being written, so nothing a body's
 // WriteTo claims can move them. With rec non-nil it appends a sizeFix for
-// this chunk and every chunk below it, recording the body sizes actually
-// written.
+// every chunk whose body encoded to a size its first-pass header does not
+// already carry — the streaming chunks and their ancestors.
 func writePlan(w io.Writer, p *planChunk, order binary.ByteOrder, cnt *countingWriter, rec *[]sizeFix) (err error) {
 	fieldOff := cnt.n + IDBytes
 	if err = writePlanHeader(w, p, order); err != nil {
@@ -356,7 +359,11 @@ func writePlan(w io.Writer, p *planChunk, order binary.ByteOrder, cnt *countingW
 		if body > MaxBodySize {
 			return fmt.Errorf("%w: chunk[%q] body is %d bytes", ErrChunkTooLarge, p.id, body)
 		}
-		*rec = append(*rec, sizeFix{fieldOff: fieldOff, bodySize: uint32(body)})
+		if bs := uint32(body); bs != p.declared {
+			// only a size the header does not already carry needs a fix-up:
+			// a fully static subtree costs the backfill nothing
+			*rec = append(*rec, sizeFix{fieldOff: fieldOff, bodySize: bs})
+		}
 	}
 	return nil
 }
