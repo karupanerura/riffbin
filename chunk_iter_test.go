@@ -322,10 +322,17 @@ func TestChunksBodyIsRevokedWhenIterationEnds(t *testing.T) {
 func TestChunksEmptyInput(t *testing.T) {
 	t.Parallel()
 
+	// exactly one yield, carrying io.EOF: an iterator yielding nothing at all
+	// would leave this loop body unexecuted, so the count is asserted too
+	var yields int
 	for info, err := range riffbin.Chunks(bytes.NewReader(nil)) {
+		yields++
 		if !errors.Is(err, io.EOF) {
 			t.Errorf("should be io.EOF but got: %v (info: %+v)", err, info)
 		}
+	}
+	if yields != 1 {
+		t.Errorf("should yield exactly one io.EOF pair but yielded %d time(s)", yields)
 	}
 }
 
