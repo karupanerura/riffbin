@@ -269,23 +269,43 @@ func TestWriterSnapshotsChunkIDBeforeWriting(t *testing.T) {
 	}
 }
 
-// A size mutated while the snapshot is still being taken cannot slip through
-// either: the root's own report re-derives its children's sizes, so the two
-// plan-time reads disagree and the write is refused before its first byte.
-func TestWriterRejectsMidPlanSizeMutation(t *testing.T) {
+// The snapshot reads a leaf's BodySize exactly once — a group's size is
+// derived from its children, never asked of the tree — so a BodySize that
+// answers differently on any later call changes nothing: the header carries
+// the planned size and the body is held to it.
+func TestWriterReadsBodySizeExactlyOnce(t *testing.T) {
 	t.Parallel()
 
-	sized := &sizeOnlyMutatingSubChunk{id: riffbin.MustParseFourCC("DAT1"), planned: 4, body: "wx", planReads: 1}
+	sized := &sizeOnlyMutatingSubChunk{id: riffbin.MustParseFourCC("DAT1"), planned: 4, body: "wxyz", planReads: 1}
 	var buf bytes.Buffer
-	n, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
 		FormType: riffbin.MustParseFourCC("TEST"),
-		Payload:  []riffbin.Chunk{sized},
-	})
-	if !errors.Is(err, riffbin.ErrSizeMismatch) {
-		t.Errorf("should be ErrSizeMismatch but got: %v", err)
+		Payload: []riffbin.Chunk{&riffbin.ListChunk{
+			ListType: riffbin.MustParseFourCC("TSTL"),
+			Payload:  []riffbin.Chunk{sized},
+		}},
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if n != 0 || buf.Len() != 0 {
-		t.Errorf("wrote %d byte(s) before failing", buf.Len())
+	if sized.calls != 1 {
+		t.Errorf("read BodySize %d time(s), want exactly once", sized.calls)
+	}
+
+	got, err := riffbin.ReadAll(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("the written file does not parse: %v", err)
+	}
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{&riffbin.ListChunk{
+			ListType: riffbin.MustParseFourCC("TSTL"),
+			Payload: []riffbin.Chunk{
+				&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("wxyz")},
+			},
+		}},
+	})
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("diff = %s", df)
 	}
 }
 
@@ -296,9 +316,8 @@ func TestWriterRejectsMidPlanSizeMutation(t *testing.T) {
 func TestWriterHoldsBodyToSnapshottedSize(t *testing.T) {
 	t.Parallel()
 
-	// the snapshot reads the size twice — once at the leaf, once inside the
-	// root's own report — so the mutation here lands after planning is over
-	sized := &sizeOnlyMutatingSubChunk{id: riffbin.MustParseFourCC("DAT1"), planned: 4, body: "wx", planReads: 2}
+	// the single plan-time read answers 4; the body then produces only 2
+	sized := &sizeOnlyMutatingSubChunk{id: riffbin.MustParseFourCC("DAT1"), planned: 4, body: "wx", planReads: 1}
 	var buf bytes.Buffer
 	_, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
 		FormType: riffbin.MustParseFourCC("TEST"),

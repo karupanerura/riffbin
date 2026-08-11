@@ -24,12 +24,14 @@ var (
 	// largest possible RIFF file, without draining the rest of the stream.
 	ErrChunkTooLarge = errors.New("riffbin: chunk too large")
 
-	// ErrSizeMismatch is returned when a chunk's BodySize disagrees with its actual
-	// encoding: a sub-chunk producing a different number of bytes than it declares,
-	// or a grouped chunk reporting a size other than what its type and children
-	// encode to. A mismatch found mid-write stops there rather than completing a
-	// corrupt file — a body is never copied past the size its header declared —
-	// and the bytes already written remain in the output.
+	// ErrSizeMismatch is returned when a sub-chunk's body disagrees with the
+	// BodySize it declares — producing more or fewer bytes, in either case
+	// judged by the bytes the destination accepted, whatever the body's own
+	// WriteTo claims or swallows. A mismatch found mid-write stops there
+	// rather than completing a corrupt file — a body is never copied past the
+	// size its header declared — and the bytes already written remain in the
+	// output. (A grouped chunk's size cannot mismatch: the writers derive it
+	// from the children and never consult the group's BodySize.)
 	ErrSizeMismatch = errors.New("riffbin: chunk body size mismatch")
 
 	// ErrUnsupportedChunkType is returned when a Chunk implements neither GroupedChunk nor SubChunk.

@@ -249,4 +249,6 @@ Input that used to be accepted silently — a nested `RIFF` chunk, a non-ASCII c
 truncated body — is now rejected. The writers validate the tree before emitting anything:
 a tree the readers would not accept fails with `ErrUnwritableChunk`, one above 4 GiB with
 `ErrChunkTooLarge`, and an already-consumed `StreamingSubChunk` with
-`ErrConsumedStreamingChunk`.
+`ErrConsumedStreamingChunk`. A group's size on disk is always derived from its
+children, so a custom `GroupedChunk` misreporting `BodySize` no longer fails the
+write: the file simply carries the derived size.

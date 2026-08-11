@@ -68,10 +68,11 @@ type Chunk interface {
 // GroupedChunk is a chunk whose body is a group type followed by other chunks.
 // RIFF and LIST are the grouped chunks defined by the specification.
 //
-// Its BodySize must report exactly what the group encodes to: the group type
-// plus every child with its header and its word-alignment pad byte. The
-// writers verify this before writing anything and fail with ErrSizeMismatch,
-// since a header carrying any other size would not read back as this tree.
+// A group's size on disk is derived: the group type plus every child with its
+// header and its word-alignment pad byte. The writers compute it from
+// Children and never consult a group's BodySize, so a custom implementation
+// cannot desynchronize a group header from the bytes below it; the built-in
+// types compute BodySize the same way, for the caller's own arithmetic.
 type GroupedChunk interface {
 	Chunk
 

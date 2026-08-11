@@ -374,50 +374,76 @@ func TestStreamingWriterEmptyBody(t *testing.T) {
 // misreportingList reports a body size that ignores its children — a broken
 // custom GroupedChunk implementation.
 type misreportingList struct {
-	children []riffbin.Chunk
+	children      []riffbin.Chunk
+	bodySizeCalls int
 }
 
-func (c *misreportingList) ChunkID() riffbin.FourCC   { return riffbin.MustParseFourCC("LIST") }
-func (c *misreportingList) BodySize() int64           { return riffbin.TypeBytes }
+func (c *misreportingList) ChunkID() riffbin.FourCC { return riffbin.MustParseFourCC("LIST") }
+func (c *misreportingList) BodySize() int64 {
+	c.bodySizeCalls++
+	return riffbin.TypeBytes
+}
 func (c *misreportingList) GroupType() riffbin.FourCC { return riffbin.MustParseFourCC("LST1") }
 func (c *misreportingList) Children() []riffbin.Chunk { return c.children }
 
-// A grouped chunk whose BodySize is not what its type and children encode to
-// would write a header the readers cannot reconcile with the bytes that
-// follow; the tree is rejected before the first byte.
-func TestWriterRejectsMisreportedGroupSize(t *testing.T) {
+// A group's size on disk is derived from its planned children — the group's
+// own BodySize is never consulted — so a custom implementation misreporting
+// it cannot desynchronize the header from the bytes below it: the file holds
+// the derived size and reads back as the real tree.
+func TestWriterDerivesGroupSize(t *testing.T) {
 	t.Parallel()
 
-	tree := func() *riffbin.RIFFChunk {
-		return &riffbin.RIFFChunk{
-			FormType: riffbin.MustParseFourCC("TEST"),
-			Payload: []riffbin.Chunk{&misreportingList{children: []riffbin.Chunk{
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{&riffbin.ListChunk{
+			ListType: riffbin.MustParseFourCC("LST1"),
+			Payload: []riffbin.Chunk{
 				&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DATA"), Payload: []byte("wxyz")},
-			}}},
+			},
+		}},
+	})
+
+	check := func(t *testing.T, list *misreportingList, out []byte) {
+		t.Helper()
+		if list.bodySizeCalls != 0 {
+			t.Errorf("the group's BodySize was consulted %d time(s), want never", list.bodySizeCalls)
+		}
+		got, err := riffbin.ReadAll(bytes.NewReader(out))
+		if err != nil {
+			t.Fatalf("the written file does not parse: %v", err)
+		}
+		if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+			t.Errorf("diff = %s", df)
 		}
 	}
 
+	list := &misreportingList{children: []riffbin.Chunk{
+		&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DATA"), Payload: []byte("wxyz")},
+	}}
 	var buf bytes.Buffer
-	n, err := riffbin.NewWriter(&buf).WriteChunk(tree())
-	if !errors.Is(err, riffbin.ErrSizeMismatch) {
-		t.Errorf("Writer: should be ErrSizeMismatch but got: %v", err)
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{list},
+	}); err != nil {
+		t.Fatalf("Writer: %v", err)
 	}
-	if n != 0 || buf.Len() != 0 {
-		t.Errorf("Writer: wrote %d byte(s) before failing", buf.Len())
-	}
+	check(t, list, buf.Bytes())
 
+	list = &misreportingList{children: []riffbin.Chunk{
+		&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DATA"), Payload: []byte("wxyz")},
+	}}
 	m := &memWriteSeeker{}
 	w, err := riffbin.NewStreamingWriter(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err = w.WriteChunk(tree())
-	if !errors.Is(err, riffbin.ErrSizeMismatch) {
-		t.Errorf("StreamingWriter: should be ErrSizeMismatch but got: %v", err)
+	if _, err = w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{list},
+	}); err != nil {
+		t.Fatalf("StreamingWriter: %v", err)
 	}
-	if n != 0 || len(m.buf) != 0 {
-		t.Errorf("StreamingWriter: wrote %d byte(s) before failing", len(m.buf))
-	}
+	check(t, list, m.buf)
 }
 
 // The same streaming sub-chunk placed twice in one tree would drain its stream

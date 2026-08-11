@@ -153,15 +153,10 @@ type planChunk struct {
 
 	// declared is the size the header carries: a leaf's BodySize read once, a
 	// zero placeholder for a streaming leaf until the backfill, and for a
-	// group the sum of what its planned children will occupy — so a group
-	// header always agrees with the bytes the write pass emits below it.
+	// group the sum of what its planned children will occupy — a group's size
+	// is derived, never asked of the tree, so a group header always agrees
+	// with the bytes the write pass emits below it.
 	declared uint32
-
-	// reported is what BodySize() returned, kept apart from declared for the
-	// group diagnostic: a group must report the sum of what its children
-	// report, and a streaming child reports its bytes produced so far — not
-	// the zero placeholder its header carries in the first pass.
-	reported int64
 
 	src    SubChunk            // non-streaming leaves: the Body() source
 	stream *streamingChunkBody // streaming leaves: the stream captured at plan time
@@ -178,8 +173,8 @@ func buildPlan(c *RIFFChunk, allowStreaming bool) (planChunk, binary.ByteOrder, 
 	// the byte order is read once and decides both the root chunk ID and the
 	// order of every size field, so the two cannot disagree
 	bo := c.ByteOrder
-	p, err := planTree(c, true, allowStreaming, 0, map[*streamingChunkBody]struct{}{})
-	if err != nil {
+	var p planChunk
+	if err := planTree(c, true, allowStreaming, 0, map[*streamingChunkBody]struct{}{}, &p); err != nil {
 		return planChunk{}, nil, err
 	}
 	if bo == BigEndian {
@@ -190,104 +185,87 @@ func buildPlan(c *RIFFChunk, allowStreaming bool) (planChunk, binary.ByteOrder, 
 	return p, bo.binary(), nil
 }
 
-// planTree validates one chunk and snapshots its subtree; streamed collects
-// the body of every streaming sub-chunk seen so far, so one placed twice in
-// the tree is caught here — the write of its second occurrence would find the
-// stream drained. The bodies are library-owned pointers, so nothing is
-// assumed about the chunk values themselves: a custom SubChunk does not have
-// to be comparable.
-func planTree(c Chunk, root, allowStreaming bool, depth int, streamed map[*streamingChunkBody]struct{}) (p planChunk, err error) {
+// planTree validates one chunk and snapshots its subtree into p, which the
+// caller has already placed in its parent's plan. streamed collects the body
+// of every streaming sub-chunk seen so far, so one placed twice in the tree is
+// caught here — the write of its second occurrence would find the stream
+// drained. The bodies are library-owned pointers, so nothing is assumed about
+// the chunk values themselves: a custom SubChunk does not have to be
+// comparable.
+func planTree(c Chunk, root, allowStreaming bool, depth int, streamed map[*streamingChunkBody]struct{}, p *planChunk) (err error) {
 	p.id = c.ChunkID()
 	if !p.id.Valid() {
-		return p, fmt.Errorf("%w: chunk ID %q is not printable ASCII", ErrUnwritableChunk, p.id[:])
+		return fmt.Errorf("%w: chunk ID %q is not printable ASCII", ErrUnwritableChunk, p.id[:])
 	}
 
 	switch cc := c.(type) {
 	case GroupedChunk:
 		p.isGroup = true
 		if depth >= maxGroupDepth {
-			return p, fmt.Errorf("%w: chunks are nested deeper than %d levels", ErrUnwritableChunk, maxGroupDepth)
+			return fmt.Errorf("%w: chunks are nested deeper than %d levels", ErrUnwritableChunk, maxGroupDepth)
 		}
 		p.groupType = cc.GroupType()
 		if !p.groupType.Valid() {
-			return p, fmt.Errorf("%w: group type %q of the %s chunk is not printable ASCII", ErrUnwritableChunk, p.groupType[:], p.id)
+			return fmt.Errorf("%w: group type %q of the %s chunk is not printable ASCII", ErrUnwritableChunk, p.groupType[:], p.id)
 		}
 		if root {
 			if p.id != riffID && p.id != rifxID {
-				return p, fmt.Errorf("%w: root chunk ID is %q, want %q or %q", ErrUnwritableChunk, p.id, riffID, rifxID)
+				return fmt.Errorf("%w: root chunk ID is %q, want %q or %q", ErrUnwritableChunk, p.id, riffID, rifxID)
 			}
 		} else if p.id != listID {
-			return p, fmt.Errorf("%w: a %s chunk must not be nested", ErrUnwritableChunk, p.id)
+			return fmt.Errorf("%w: a %s chunk must not be nested", ErrUnwritableChunk, p.id)
 		}
 		children := cc.Children()
-		p.children = make([]planChunk, 0, len(children))
+		p.children = make([]planChunk, len(children))
+		// a group's size is derived from its planned children — the tree is
+		// never asked for it, so a custom implementation cannot misreport it.
+		// The sum is checked against the size field's bound at every step, and
+		// each planned size fits in 32 bits, so it stays far from overflowing
 		declared := int64(TypeBytes)
-		reported := int64(TypeBytes)
-		for _, child := range children {
-			cp, cerr := planTree(child, false, allowStreaming, depth+1, streamed)
-			if cerr != nil {
-				return p, cerr
+		for i, child := range children {
+			cp := &p.children[i]
+			if cerr := planTree(child, false, allowStreaming, depth+1, streamed, cp); cerr != nil {
+				return cerr
 			}
 			// what the child will occupy on disk: its header, its planned body
-			// and its word-alignment pad byte. The sum is checked against the
-			// size field's bound at every step, and each planned size fits in
-			// 32 bits, so it stays far from overflowing whatever the tree does
+			// and its word-alignment pad byte
 			declared += HeaderBytes + int64(cp.declared) + int64(cp.declared&1)
 			if declared > MaxBodySize {
-				return p, fmt.Errorf("%w: chunk[%q] body is %d bytes", ErrChunkTooLarge, p.id, declared)
+				return fmt.Errorf("%w: chunk[%q] body is %d bytes", ErrChunkTooLarge, p.id, declared)
 			}
-			// what the child reports, for the diagnostic below — the same
-			// arithmetic the built-in group types use for their own BodySize
-			reported += HeaderBytes + cp.reported + (cp.reported & 1)
-			p.children = append(p.children, cp)
 		}
 		p.declared = uint32(declared)
-		// children first: their own defects are reported ahead of their
-		// parent's sum, and the recursion above has just been depth-bounded
-		p.reported = cc.BodySize()
-		if p.reported != reported {
-			return p, fmt.Errorf("%w: chunk[%q] reports a %d byte body but its group type and children encode to %d byte(s)", ErrSizeMismatch, p.id, p.reported, reported)
-		}
-		// the report agrees with the children, but with streaming children it
-		// is still only a claim about the final size; a claim the size field
-		// cannot hold is rejected the same way a leaf's would be
-		if _, err := clampBodySize(p.id, p.reported); err != nil {
-			return p, err
-		}
 	case SubChunk:
 		switch p.id {
 		case riffID, rifxID, listID:
-			return p, fmt.Errorf("%w: %s is a grouped-chunk ID but the chunk is a sub-chunk", ErrUnwritableChunk, p.id)
+			return fmt.Errorf("%w: %s is a grouped-chunk ID but the chunk is a sub-chunk", ErrUnwritableChunk, p.id)
 		}
 		if sc, ok := cc.(streamer); ok {
 			if !allowStreaming {
-				return p, ErrUnexpectedStreamingChunk
+				return ErrUnexpectedStreamingChunk
 			}
 			body := sc.streamingBody()
 			if body.consumed {
-				return p, fmt.Errorf("%w: chunk[%q] stream was already consumed after producing %d byte(s)", ErrConsumedStreamingChunk, p.id, body.readLength)
+				return fmt.Errorf("%w: chunk[%q] stream was already consumed after producing %d byte(s)", ErrConsumedStreamingChunk, p.id, body.readLength)
 			}
 			if _, dup := streamed[body]; dup {
-				return p, fmt.Errorf("%w: chunk[%q] is placed more than once in the tree; its stream would already be drained at the second occurrence", ErrConsumedStreamingChunk, p.id)
+				return fmt.Errorf("%w: chunk[%q] is placed more than once in the tree; its stream would already be drained at the second occurrence", ErrConsumedStreamingChunk, p.id)
 			}
 			streamed[body] = struct{}{}
 			p.stream = body
 			// the header goes out with the zero placeholder in p.declared and
-			// the backfill sizes the chunk from the bytes its stream produces;
-			// what the chunk reports still counts into its parent's diagnostic
-			p.reported = cc.BodySize()
-			return p, nil
+			// the backfill sizes the chunk from the bytes its stream produces
+			return nil
 		}
 		p.src = cc
-		p.reported = cc.BodySize()
-		p.declared, err = clampBodySize(p.id, p.reported)
+		p.declared, err = clampBodySize(p.id, cc.BodySize())
 		if err != nil {
-			return p, err
+			return err
 		}
 	default:
-		return p, unsupportedChunkTypeError(c)
+		return unsupportedChunkTypeError(c)
 	}
-	return p, nil
+	return nil
 }
 
 var paddingByte = [1]byte{0x00}
