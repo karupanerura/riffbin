@@ -42,6 +42,24 @@ func paddedFileChunk() *riffbin.RIFFChunk {
 	}
 }
 
+// The policy names its own value, including the zero value and anything
+// outside the three the package defines — a String that panics or returns ""
+// on an unexpected value would only show up in an error message.
+func TestPaddingPolicyString(t *testing.T) {
+	t.Parallel()
+
+	for policy, want := range map[riffbin.PaddingPolicy]string{
+		riffbin.PadStrict:          "strict",
+		riffbin.PadOmitted:         "omitted",
+		riffbin.PadGarbage:         "garbage",
+		riffbin.PaddingPolicy(200): "strict",
+	} {
+		if got := policy.String(); got != want {
+			t.Errorf("PaddingPolicy(%d).String() = %q, want %q", uint8(policy), got, want)
+		}
+	}
+}
+
 func TestWriterPadsOddChunk(t *testing.T) {
 	t.Parallel()
 
