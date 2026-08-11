@@ -191,7 +191,11 @@ var _ SubChunk = (*StreamingSubChunk)(nil)
 // The length of r does not have to be known in advance: StreamingWriter
 // writes the payload through and fixes the size fields afterwards. A chunk
 // built over a nil r is rejected by the writers with ErrUnwritableChunk,
-// before anything is written.
+// before anything is written; so is one built over an r another chunk of the
+// same tree already streams from, whose bytes the earlier chunk would have
+// drained. That check identifies r by pointer: a reader that is not one
+// cannot advance its own state, so equal copies of it are independent
+// streams — but a value merely wrapping a shared reader is not recognized.
 func NewStreamingSubChunk(id FourCC, r io.Reader) *StreamingSubChunk {
 	return &StreamingSubChunk{id: id, body: streamingChunkBody{reader: r}}
 }

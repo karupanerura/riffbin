@@ -49,9 +49,12 @@ var (
 	ErrUnwritableChunk = errors.New("riffbin: unwritable chunk")
 
 	// ErrConsumedStreamingChunk is returned when a streaming sub-chunk is written after its
-	// body stream has already been consumed — or is placed more than once in one tree, so
-	// a later occurrence would find it consumed. Either way the stream cannot produce its
-	// payload again, and the write would silently emit an empty chunk in its place.
+	// body stream has already been consumed — or when its stream would be drained before
+	// the write reaches it: the chunk is placed more than once in one tree, or another
+	// chunk in the tree streams from the same reader. Either way the stream cannot
+	// produce its payload again, and the write would silently emit an empty chunk.
+	// Shared readers are recognized by pointer identity, which is what a reader with
+	// a stream to consume is; a value that wraps one is not looked into.
 	ErrConsumedStreamingChunk = errors.New("riffbin: streaming chunk already consumed")
 )
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 )
 
 // ChunkWriter is the interface shared by the chunk writers: it writes a whole
@@ -173,7 +174,7 @@ func buildPlan(c *RIFFChunk, allowStreaming bool) (planChunk, binary.ByteOrder, 
 	// order of every size field, so the two cannot disagree
 	bo := c.ByteOrder
 	var p planChunk
-	if err := planTree(c, true, allowStreaming, 0, map[*streamingChunkBody]struct{}{}, &p); err != nil {
+	if err := planTree(c, true, allowStreaming, 0, map[any]struct{}{}, &p); err != nil {
 		return planChunk{}, nil, err
 	}
 	if bo == BigEndian {
@@ -185,13 +186,13 @@ func buildPlan(c *RIFFChunk, allowStreaming bool) (planChunk, binary.ByteOrder, 
 }
 
 // planTree validates one chunk and snapshots its subtree into p, which the
-// caller has already placed in its parent's plan. streamed collects the body
-// of every streaming sub-chunk seen so far, so one placed twice in the tree is
-// caught here — the write of its second occurrence would find the stream
-// drained. The bodies are library-owned pointers, so nothing is assumed about
-// the chunk values themselves: a custom SubChunk does not have to be
-// comparable.
-func planTree(c Chunk, root, allowStreaming bool, depth int, streamed map[*streamingChunkBody]struct{}, p *planChunk) (err error) {
+// caller has already placed in its parent's plan. streamed collects the
+// stream of every streaming sub-chunk seen so far — keyed by the underlying
+// reader when that reader is a pointer, by the library-owned body otherwise —
+// so a stream that would already be drained when the write reaches it is
+// caught here: the same chunk placed twice, or two chunks built over one
+// reader.
+func planTree(c Chunk, root, allowStreaming bool, depth int, streamed map[any]struct{}, p *planChunk) (err error) {
 	p.id = c.ChunkID()
 	if !p.id.Valid() {
 		return fmt.Errorf("%w: chunk ID %q is not printable ASCII", ErrUnwritableChunk, p.id[:])
@@ -250,10 +251,22 @@ func planTree(c Chunk, root, allowStreaming bool, depth int, streamed map[*strea
 			if body.consumed {
 				return fmt.Errorf("%w: chunk[%q] stream was already consumed after producing %d byte(s)", ErrConsumedStreamingChunk, p.id, body.readLength)
 			}
-			if _, dup := streamed[body]; dup {
-				return fmt.Errorf("%w: chunk[%q] is placed more than once in the tree; its stream would already be drained at the second occurrence", ErrConsumedStreamingChunk, p.id)
+			// key by the underlying reader when its identity is the stream's
+			// identity: two chunks over one pointer are as doomed as one chunk
+			// placed twice. A reader that is not a pointer cannot advance its
+			// own state — a value receiver has nothing to advance — so equal
+			// value readers are independent streams, and hashing arbitrary
+			// caller values would panic on the ones that only compare in
+			// principle: a struct holding an interface is comparable to the
+			// compiler, but hashing it hashes whatever the interface carries.
+			key := any(body)
+			if reflect.ValueOf(body.reader).Kind() == reflect.Pointer {
+				key = body.reader
 			}
-			streamed[body] = struct{}{}
+			if _, dup := streamed[key]; dup {
+				return fmt.Errorf("%w: chunk[%q] shares its stream with an earlier chunk in the tree; the stream would already be drained when this chunk is written", ErrConsumedStreamingChunk, p.id)
+			}
+			streamed[key] = struct{}{}
 			p.stream = body
 			// the header goes out with the zero placeholder in p.declared and
 			// the backfill sizes the chunk from the bytes its stream produces

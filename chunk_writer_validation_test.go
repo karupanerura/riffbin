@@ -446,56 +446,6 @@ func TestWriterDerivesGroupSize(t *testing.T) {
 	check(t, list, m.buf)
 }
 
-// A streaming sub-chunk built over a nil reader fails while planning, as a
-// typed error before the first byte — never as a panic after the headers are
-// already in the output.
-func TestStreamingWriterRejectsNilReader(t *testing.T) {
-	t.Parallel()
-
-	m := &memWriteSeeker{}
-	w, err := riffbin.NewStreamingWriter(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, err := w.WriteChunk(&riffbin.RIFFChunk{
-		FormType: riffbin.MustParseFourCC("TEST"),
-		Payload: []riffbin.Chunk{
-			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), nil),
-		},
-	})
-	if !errors.Is(err, riffbin.ErrUnwritableChunk) {
-		t.Errorf("should be ErrUnwritableChunk but got: %v", err)
-	}
-	if n != 0 || len(m.buf) != 0 {
-		t.Errorf("wrote %d byte(s) before failing", len(m.buf))
-	}
-}
-
-// nilBodySubChunk answers Body with nil — a broken custom SubChunk.
-type nilBodySubChunk struct{}
-
-func (nilBodySubChunk) ChunkID() riffbin.FourCC { return riffbin.MustParseFourCC("DAT1") }
-func (nilBodySubChunk) BodySize() int64         { return 0 }
-func (nilBodySubChunk) Body() io.Reader         { return nil }
-
-// A sub-chunk whose Body is nil fails while planning, like every other defect
-// the plan can see — not as a nil dereference inside the copy.
-func TestWriterRejectsNilBody(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	n, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
-		FormType: riffbin.MustParseFourCC("TEST"),
-		Payload:  []riffbin.Chunk{nilBodySubChunk{}},
-	})
-	if !errors.Is(err, riffbin.ErrUnwritableChunk) {
-		t.Errorf("should be ErrUnwritableChunk but got: %v", err)
-	}
-	if n != 0 || buf.Len() != 0 {
-		t.Errorf("wrote %d byte(s) before failing", buf.Len())
-	}
-}
-
 // The same streaming sub-chunk placed twice in one tree would drain its stream
 // at the first occurrence and write a lying header at the second; the tree is
 // rejected before the first byte, like every defect that is checkable up front.
@@ -590,11 +540,12 @@ func TestStreamingWriterIgnoresOverriddenBodySize(t *testing.T) {
 	}
 }
 
-// Two streaming sub-chunks sharing one underlying reader are beyond what the
-// writer can see: the first drains the stream and the second truthfully
-// reports the zero bytes it produced, so the output is a valid file whose
-// second chunk is empty.
-func TestStreamingWriterSharedUnderlyingReader(t *testing.T) {
+// Two streaming sub-chunks built over one underlying reader: the first would
+// drain the stream and the second would silently write an empty chunk. The
+// plan keys the duplicate check by the reader itself, so the tree is rejected
+// before the first byte — reusing a reader variable is all it takes to hit
+// this, no contract violation required.
+func TestStreamingWriterRejectsSharedUnderlyingReader(t *testing.T) {
 	t.Parallel()
 
 	r := strings.NewReader("abcdef")
@@ -603,11 +554,55 @@ func TestStreamingWriterSharedUnderlyingReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = w.WriteChunk(&riffbin.RIFFChunk{
+	n, err := w.WriteChunk(&riffbin.RIFFChunk{
 		FormType: riffbin.MustParseFourCC("TEST"),
 		Payload: []riffbin.Chunk{
 			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), r),
 			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT2"), r),
+		},
+	})
+	if !errors.Is(err, riffbin.ErrConsumedStreamingChunk) {
+		t.Errorf("should be ErrConsumedStreamingChunk but got: %v", err)
+	}
+	if n != 0 || len(m.buf) != 0 {
+		t.Errorf("wrote %d byte(s) before failing", len(m.buf))
+	}
+	if r.Len() != 6 {
+		t.Errorf("the stream should be untouched but %d of 6 byte(s) remain", r.Len())
+	}
+}
+
+// nonComparableReader is an io.Reader whose dynamic type cannot be a map key —
+// the duplicate-stream check must fall back to the library-owned body instead
+// of panicking, and distinct readers must not be mistaken for one another.
+type nonComparableReader struct {
+	parts [][]byte
+}
+
+func (r nonComparableReader) Read(p []byte) (int, error) {
+	if len(r.parts) == 0 || len(r.parts[0]) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.parts[0])
+	return n, io.EOF
+}
+
+// Distinct streams behind non-comparable reader types must both write — the
+// reader-identity check degrades to the per-chunk stream, never to a panic or
+// a false rejection.
+func TestStreamingWriterAcceptsDistinctNonComparableReaders(t *testing.T) {
+	t.Parallel()
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), nonComparableReader{parts: [][]byte{[]byte("ab")}}),
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT2"), nonComparableReader{parts: [][]byte{[]byte("cd")}}),
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -620,12 +615,172 @@ func TestStreamingWriterSharedUnderlyingReader(t *testing.T) {
 	expected := flattenTree(t, &riffbin.RIFFChunk{
 		FormType: riffbin.MustParseFourCC("TEST"),
 		Payload: []riffbin.Chunk{
-			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("abcdef")},
-			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT2"), Payload: []byte{}},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("ab")},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT2"), Payload: []byte("cd")},
 		},
 	})
 	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
 		t.Errorf("diff = %s", df)
+	}
+}
+
+// funcReader is an io.Reader of a type that cannot be hashed at all: a func
+// type is not even comparable.
+type funcReader func([]byte) (int, error)
+
+func (f funcReader) Read(p []byte) (int, error) { return f(p) }
+
+// wrapReader is the shape io.NopCloser has — a value struct holding an
+// interface. reflect reports the type comparable, because an interface field
+// is, but hashing a value of it hashes whatever the interface carries: over a
+// funcReader that panics. The duplicate-stream check must not key on such a
+// value; nothing about the tree is wrong here.
+type wrapReader struct{ io.Reader }
+
+func onceReader(payload string) funcReader {
+	done := false
+	return func(p []byte) (int, error) {
+		if done {
+			return 0, io.EOF
+		}
+		done = true
+		return copy(p, payload), nil
+	}
+}
+
+// A reader whose type only compares in principle must not be used as a map
+// key: the write plans and runs instead of panicking with "hash of unhashable
+// type" halfway through the tree.
+func TestStreamingWriterAcceptsUnhashableWrappedReader(t *testing.T) {
+	t.Parallel()
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), wrapReader{onceReader("ab")}),
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT2"), wrapReader{onceReader("cd")}),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := riffbin.ReadAll(bytes.NewReader(m.buf))
+	if err != nil {
+		t.Fatalf("the written file does not parse: %v", err)
+	}
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("ab")},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT2"), Payload: []byte("cd")},
+		},
+	})
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("diff = %s", df)
+	}
+}
+
+// constReader is a stateless reader: its Read has a value receiver, so it has
+// nothing to advance and every copy of it produces the same payload.
+type constReader struct{ payload string }
+
+func (c constReader) Read(p []byte) (int, error) {
+	if c.payload == "" {
+		return 0, io.EOF
+	}
+	return copy(p, c.payload), io.EOF
+}
+
+// Two equal stateless readers are two independent streams — a value receiver
+// cannot drain anything — so both chunks must be written. Keying the
+// duplicate-stream check on the reader's value instead of its identity would
+// reject this perfectly writable tree.
+func TestStreamingWriterAcceptsEqualStatelessReaders(t *testing.T) {
+	t.Parallel()
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), constReader{payload: "ab"}),
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT2"), constReader{payload: "ab"}),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := riffbin.ReadAll(bytes.NewReader(m.buf))
+	if err != nil {
+		t.Fatalf("the written file does not parse: %v", err)
+	}
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT1"), Payload: []byte("ab")},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("DAT2"), Payload: []byte("ab")},
+		},
+	})
+	if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+		t.Errorf("diff = %s", df)
+	}
+}
+
+// A streaming sub-chunk built over a nil reader fails while planning, as a
+// typed error before the first byte — never as a panic after the headers are
+// already in the output.
+func TestStreamingWriterRejectsNilReader(t *testing.T) {
+	t.Parallel()
+
+	m := &memWriteSeeker{}
+	w, err := riffbin.NewStreamingWriter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := w.WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("DAT1"), nil),
+		},
+	})
+	if !errors.Is(err, riffbin.ErrUnwritableChunk) {
+		t.Errorf("should be ErrUnwritableChunk but got: %v", err)
+	}
+	if n != 0 || len(m.buf) != 0 {
+		t.Errorf("wrote %d byte(s) before failing", len(m.buf))
+	}
+}
+
+// nilBodySubChunk answers Body with nil — a broken custom SubChunk.
+type nilBodySubChunk struct{}
+
+func (nilBodySubChunk) ChunkID() riffbin.FourCC { return riffbin.MustParseFourCC("DAT1") }
+func (nilBodySubChunk) BodySize() int64         { return 0 }
+func (nilBodySubChunk) Body() io.Reader         { return nil }
+
+// A sub-chunk whose Body is nil fails while planning, like every other defect
+// the plan can see — not as a nil dereference inside the copy.
+func TestWriterRejectsNilBody(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	n, err := riffbin.NewWriter(&buf).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{nilBodySubChunk{}},
+	})
+	if !errors.Is(err, riffbin.ErrUnwritableChunk) {
+		t.Errorf("should be ErrUnwritableChunk but got: %v", err)
+	}
+	if n != 0 || buf.Len() != 0 {
+		t.Errorf("wrote %d byte(s) before failing", buf.Len())
 	}
 }
 

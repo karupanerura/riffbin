@@ -87,7 +87,8 @@
 // structural ID such as "LIST", a nested RIFF chunk, nesting too deep to read back,
 // a sub-chunk whose Body is nil or a streaming sub-chunk built over a nil reader
 // fails with [ErrUnwritableChunk], and a streaming sub-chunk whose stream was already
-// consumed — or one placed twice in the tree, which would find it consumed — fails
+// consumed — or would be drained before the write reaches it, because the chunk is
+// placed twice in the tree or another chunk streams from the same reader pointer — fails
 // with [ErrConsumedStreamingChunk]. A group's size is never asked of the tree: the
 // writers derive it from the planned children, so a custom [GroupedChunk] cannot
 // misdeclare it; a derived size above 4 GiB fails with [ErrChunkTooLarge]. A leaf
