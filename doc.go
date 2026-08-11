@@ -5,56 +5,116 @@
 //
 // A RIFF file is a tree. The root is a [RIFFChunk], whose body is a form type
 // followed by other chunks. A [ListChunk] nests further chunks under a list type;
-// both implement [GroupedChunk]. Every other chunk is a leaf carrying bytes and
-// implements [SubChunk].
+// both implement [GroupedChunk], and they are the only two chunks the
+// specification allows to contain other chunks. Every other chunk is a leaf
+// carrying bytes and implements [SubChunk].
 //
-// Chunk IDs and group types are [FourCC] values: four printable ASCII bytes,
-// padded on the right with spaces, e.g. [MustFourCC]("fmt ").
+// Chunk IDs and group types are [FourCC] values, padded on the right with spaces,
+// e.g. [MustParseFourCC]("fmt "). The specification defines them as ASCII alphanumeric;
+// riffbin accepts any printable ASCII, matching real-world files.
 //
 // # Word alignment
 //
-// A chunk whose body has an odd length is followed by a single 0x00 pad byte.
-// The pad byte is not counted in the chunk's own size field, but it is counted in
-// the size of the chunk that contains it. Both writers emit it. The readers require
-// it whenever the enclosing size says there is room for one; a final chunk whose
-// parent size stops right at the odd body is read without it, and a single 0x00
-// after such a chunk is tolerated at the end of the input, since many writers append
-// the last pad byte without counting it. Pass [AllowUnpaddedChunks] to read files
-// that omit pad bytes entirely; riffbin up to v0.0.6 wrote such files.
+// A chunk whose body has an odd length is followed by a single pad byte, which
+// the specification requires to be zero. The pad byte is not counted in the
+// chunk's own size field, but it is counted in the size of the chunk that
+// contains it. Both writers emit it.
+//
+// The readers require the pad byte wherever the enclosing size says there is
+// room for one. Two deviations common in real files are still read without an
+// option: a final chunk whose parent size stops right at the odd body, and a
+// single 0x00 after the root chunk wherever the specification calls for one —
+// the root's own body size is odd, or the final chunk's pad byte was left
+// uncounted by every enclosing size. What the byte at a pad position means
+// otherwise is one three-valued choice, [PaddingPolicy]: [PadOmitted] reads
+// files that omit pad bytes entirely (riffbin up to v0.0.6 wrote such files,
+// and e.g. Apple CoreAudio still writes them); [PadGarbage] reads files whose
+// pad bytes hold garbage instead of zero, skipping them without inspection
+// like the reference readers do. A printable garbage pad is indistinguishable
+// from the next header of an unpadded file, so the policy declares which way
+// that byte reads — declare the deviation the input actually has; a
+// conflicting combination is not expressible.
 //
 // # Reading
 //
-// [ReadFull] accepts any io.Reader and materializes every sub-chunk body in memory
-// as an [OnMemorySubChunk]. [ReadSections] needs a [PartialReader] and skips the
-// bodies, returning an [InStreamSubChunk] that reads from the original stream on
-// demand; use it for files too large to hold in memory.
+// [ReadAll] accepts any io.Reader and materializes every sub-chunk body in
+// memory as an [InMemorySubChunk]. [ReadSections] needs a [ReadSeekerAt] and
+// skips the bodies, returning a [SectionSubChunk] that reads from the original
+// stream on demand; use it for files whose payloads are too large to hold in
+// memory — its tree still grows with the number of chunks. [Chunks]
+// builds no tree at all: it yields every chunk in document order as the input
+// is scanned, keeping memory proportional to the nesting depth — for files
+// with too many chunks to hold even their headers, such as an AVI file, which
+// stores one chunk per video frame. [Walk] iterates the same way over an
+// already-parsed tree. An input that ends before the first byte of the root
+// chunk header yields io.EOF.
 //
-// Both readers are strict by default. Malformed input yields a [SyntaxError],
-// which carries the byte offset and the chunk path and wraps [ErrInvalidFormat]:
+// Every reader is strict by default, and every reader — the tree readers, the
+// streaming parser, reading through or skipping by seeking — applies the same
+// rules: seeking is only an optimization, never a second parser. Malformed
+// input yields a [SyntaxError], which carries the byte offset and the chunk
+// path and wraps [ErrInvalidFormat]; an I/O failure of the underlying reader
+// surfaces as the reader's own error, matched with errors.Is, and never as a
+// format error:
 //
-//	chunk, err := riffbin.ReadFull(r)
+//	chunk, err := riffbin.ReadAll(r)
 //	if errors.Is(err, riffbin.ErrInvalidFormat) {
 //		// ...
 //	}
 //
-// [AllowUnpaddedChunks] and [AllowTrailingData] relax individual rules for files
-// that do not follow the specification.
+// The [PaddingPolicy] values and [AllowTrailingData] relax individual rules
+// for files that do not follow the specification. With [AllowTrailingData] a
+// call consumes exactly one root chunk and leaves the input right after it,
+// so a stream of concatenated RIFF chunks — the layout AVI 2.0 uses to grow
+// past the 32-bit size field by appending RIFF("AVIX") chunks — is read by
+// calling [ReadAll] or [ReadSections] repeatedly until io.EOF; [Concatenated]
+// wraps that loop as an iterator. A pad byte that a chunk's writer left
+// uncounted in its RIFF size is skipped before the next chunk of such a
+// stream.
 //
 // # Writing
 //
-// [CompletedChunkWriter] writes a tree whose sizes are all known up front.
-// [IncompleteChunkWriter] additionally accepts an [IncompleteSubChunk], whose body
-// comes from an io.Reader of unknown length; it writes placeholder sizes and seeks
-// back to fix them once the stream has been consumed, so it needs an io.WriteSeeker.
+// [Writer] writes a tree whose sizes are all known up front.
+// [StreamingWriter] additionally accepts a [StreamingSubChunk], whose body
+// comes from an io.Reader of unknown length; it writes placeholder sizes and
+// seeks back to fix them once the stream has been consumed, so it needs an
+// io.WriteSeeker.
 //
-// A completed sub-chunk can be written repeatedly: [SubChunk.Body] hands out an
-// independent reader on every call. Before the first byte is written, the tree is
+// A non-streaming sub-chunk can be written repeatedly: [SubChunk.Body] hands out an
+// independent reader on every call. A streaming sub-chunk is a [StreamingSubChunk] —
+// or a type embedding one — and is sized from the bytes its stream actually
+// produces, never from what it reports. Before the first byte is written, the tree is
 // checked against what the readers accept: a non-ASCII FourCC, a sub-chunk using a
-// structural ID such as "LIST", or a nested RIFF chunk fails with [ErrInvalidChunk],
-// and an incomplete sub-chunk whose stream was already consumed fails with
-// [ErrConsumedIncompleteChunk]. A write that would produce a file inconsistent
-// with the declared sizes fails with [ErrSizeMismatch] or [ErrChunkTooLarge] rather
-// than emitting corrupt bytes.
+// structural ID such as "LIST", a nested RIFF chunk, nesting too deep to read back,
+// a sub-chunk whose Body is nil or a streaming sub-chunk built over a nil reader
+// fails with [ErrUnwritableChunk], and a streaming sub-chunk whose stream was already
+// consumed — or would be drained before the write reaches it, because the chunk is
+// placed twice in the tree or another chunk streams from the same reader pointer — fails
+// with [ErrConsumedStreamingChunk]. A group's size is never asked of the tree: the
+// writers derive it from the planned children, so a custom [GroupedChunk] cannot
+// misdeclare it; a derived size above 4 GiB fails with [ErrChunkTooLarge]. A leaf
+// body that produces a different number of bytes than it declares is only caught as
+// it is copied, failing with [ErrSizeMismatch] where the write stops — the header
+// and part of the body are already emitted; the copy never runs past the declared
+// size, so even an endless body fails right at that boundary. A streaming body,
+// which has no declared size, is capped where its tree outgrows the largest
+// possible RIFF file, failing with [ErrChunkTooLarge] as it streams.
+//
+// Each WriteChunk call reads the tree exactly once: planning snapshots every
+// ChunkID, GroupType, Children and leaf BodySize, and captures every body
+// reader — [SubChunk.Body] is called once per leaf, during planning — so the
+// write pass runs from the snapshot alone and the only caller code it enters
+// is the drain of the captured readers. Sizes and offsets are measured on the
+// destination side of every copy, and what the cap and the counter record is
+// authoritative: a method answering differently once planning is over, a
+// body's WriteTo misreporting its count, or one swallowing the destination's
+// error therefore cannot desynchronize the size fields from the bytes
+// actually written, pass a failed write off as a success, or drive the
+// writers into unbounded recursion; a panic raised inside the
+// implementation's own methods still propagates. The one count taken on trust
+// is a destination's own io.ReaderFrom: where the destination provides one the
+// writers let it consume the body, and the bytes it reports are the bytes the
+// size fields and offsets are derived from.
 //
 // # Byte order
 //

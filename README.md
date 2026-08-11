@@ -1,54 +1,74 @@
 # github.com/karupanerura/riffbin ![](https://github.com/karupanerura/riffbin/workflows/test/badge.svg?branch=main) [![Go Reference](https://pkg.go.dev/badge/github.com/karupanerura/riffbin.svg)](https://pkg.go.dev/github.com/karupanerura/riffbin) [![codecov.io](https://codecov.io/github/karupanerura/riffbin/coverage.svg?branch=main)](https://codecov.io/github/karupanerura/riffbin?branch=main)
 
-Go module implementing for RIFF binary format.
+Go library for reading and writing the Resource Interchange File Format (RIFF),
+the chunked container behind WAVE, AVI, WebP and many other formats.
 
 # Features
 
-* Construct RIFF data structure
-* Write RIFF data structure
-  * Can write RIFF data from io.Reader
-* Parse RIFF binary to data structure
-  * In memory, or lazily from a seekable stream
+* Builds, writes and parses RIFF chunk trees
+* Writes a chunk body straight from an `io.Reader` of unknown length, fixing the
+  size fields afterwards
+* Parses in memory, lazily from a seekable stream, or as an iterator that builds
+  no tree at all — memory stays proportional to the nesting depth
+* Iterates parsed trees (`Walk`) and streams of concatenated RIFF chunks
+  (`Concatenated`, the AVI 2.0 layout)
 * RIFX (big-endian RIFF) in both directions
-* Strict about the specification, with opt-in leniency for files that are not
+* Strict about the specification, with opt-in leniency for files that do not
+  follow it
+* Ships `cmd/riffdump` to print the chunk tree of a RIFF file
+
+Requires Go 1.26.
 
 # Motivation
 
-There has never been a library that can be used without pre-determining the binary size in Go.
+No RIFF library in Go could write a file without knowing every chunk size up
+front. riffbin can, so e.g. a live recording streams straight into a WAVE file.
 
 # Data model
 
 A RIFF file is a tree. `*RIFFChunk` is the root, `*ListChunk` nests further chunks;
-both implement `GroupedChunk`. Everything else is a leaf implementing `SubChunk`:
+both implement `GroupedChunk`, and they are the only two chunks the specification
+allows to contain other chunks. Everything else is a leaf implementing `SubChunk`:
 
 | type | payload |
 | --- | --- |
-| `*OnMemorySubChunk` | a `[]byte` you own |
-| `*InStreamSubChunk` | a section of a seekable stream, read on demand |
-| `*IncompleteSubChunk` | an `io.Reader` whose length is not known in advance |
+| `*InMemorySubChunk` | a `[]byte` you own |
+| `*SectionSubChunk` | a section of a seekable stream, read on demand |
+| `*StreamingSubChunk` | an `io.Reader` whose length is not known in advance |
 
-Chunk IDs and group types are `FourCC` values — four printable ASCII bytes, padded
-on the right with spaces. Use a literal (`[4]byte{'f', 'm', 't', ' '}`) or
-`riffbin.MustFourCC("fmt")`.
+Chunk IDs and group types are `FourCC` values, padded on the right with spaces. The
+specification defines them as ASCII alphanumeric; riffbin accepts any printable ASCII,
+matching the identifiers found in real-world files. Use a literal
+(`[4]byte{'f', 'm', 't', ' '}`) or `riffbin.MustParseFourCC("fmt")`.
 
 ## Word alignment
 
-A chunk whose body has an odd length is followed by a single `0x00` pad byte. The pad
-byte is not counted in the chunk's own size field, but it is counted in the size of the
-chunk containing it. Both writers emit it, and the readers require it whenever the
-enclosing size says there is room for one; a final chunk whose pad byte was left
-uncounted is still read, with a single trailing `0x00` tolerated.
+A chunk whose body has an odd length is followed by a single pad byte, which the
+specification requires to be zero. The pad byte is not counted in the chunk's own
+size field, but it is counted in the size of the chunk containing it. Both writers
+emit it.
+
+The readers require the pad byte whenever the enclosing size says there is room for
+one. Two deviations common in real files are still read without an option: a final
+chunk whose pad byte was left uncounted, and the single trailing `0x00` the
+specification calls for after the root chunk — its own body size odd, or that
+uncounted final pad. What the byte at a pad position means otherwise is one
+three-valued choice, `PaddingPolicy`: `PadOmitted` reads files that omit pad bytes
+entirely, and `PadGarbage` files whose pad bytes hold garbage instead of zero (see
+Example 4). A printable garbage pad is indistinguishable from the next header of an
+unpadded file, so the policy declares which way that byte reads — and a conflicting
+combination is not expressible.
 
 # Examples
 
 ## Example 1: write a WAVE file
 
 ```go
-_, err := riffbin.NewCompletedChunkWriter(w).WriteChunk(&riffbin.RIFFChunk{
-	FormType: riffbin.MustFourCC("WAVE"),
+_, err := riffbin.NewWriter(w).WriteChunk(&riffbin.RIFFChunk{
+	FormType: riffbin.MustParseFourCC("WAVE"),
 	Payload: []riffbin.Chunk{
-		&riffbin.OnMemorySubChunk{
-			ID: riffbin.MustFourCC("fmt"),
+		&riffbin.InMemorySubChunk{
+			ID: riffbin.MustParseFourCC("fmt"),
 			Payload: []byte{
 				0x01, 0x00, // Compression Code (Linear PCM)
 				0x01, 0x00, // Number of channels (Monoral)
@@ -58,8 +78,8 @@ _, err := riffbin.NewCompletedChunkWriter(w).WriteChunk(&riffbin.RIFFChunk{
 				0x08, 0x00, // Significant bits per sample (8bit)
 			},
 		},
-		&riffbin.OnMemorySubChunk{
-			ID:      riffbin.MustFourCC("data"),
+		&riffbin.InMemorySubChunk{
+			ID:      riffbin.MustParseFourCC("data"),
 			Payload: pcm, // []byte
 		},
 	},
@@ -68,33 +88,33 @@ _, err := riffbin.NewCompletedChunkWriter(w).WriteChunk(&riffbin.RIFFChunk{
 
 ## Example 2: write a WAVE file from an io.Reader
 
-The body size of an `IncompleteSubChunk` is only known once its reader is drained, so
-`IncompleteChunkWriter` writes placeholder sizes and seeks back to fix every affected
+The body size of an `StreamingSubChunk` is only known once its reader is drained, so
+`StreamingWriter` writes placeholder sizes and seeks back to fix every affected
 chunk header. It therefore needs an `io.WriteSeeker`.
 
 ```go
-w, err := riffbin.NewIncompleteChunkWriter(f)
+w, err := riffbin.NewStreamingWriter(f)
 if err != nil {
 	panic(err)
 }
 
 _, err = w.WriteChunk(&riffbin.RIFFChunk{
-	FormType: riffbin.MustFourCC("WAVE"),
+	FormType: riffbin.MustParseFourCC("WAVE"),
 	Payload: []riffbin.Chunk{
-		&riffbin.OnMemorySubChunk{
-			ID:      riffbin.MustFourCC("fmt"),
+		&riffbin.InMemorySubChunk{
+			ID:      riffbin.MustParseFourCC("fmt"),
 			Payload: fmtChunkPayload,
 		},
-		riffbin.NewIncompleteSubChunk(riffbin.MustFourCC("data"), r),
+		riffbin.NewStreamingSubChunk(riffbin.MustParseFourCC("data"), r),
 	},
 })
 ```
 
 ## Example 3: read a RIFF file
 
-`ReadFull` takes any `io.Reader` and holds every body in memory. `ReadSections` takes an
-`io.ReadSeeker`+`io.ReaderAt` and only records where each body lives, so it can open
-files far larger than memory.
+`ReadAll` takes any `io.Reader` and holds every body in memory. `ReadSections` takes
+a `ReadSeekerAt` (`io.ReadSeeker` + `io.ReaderAt`) and only records where each body
+lives, so it can open files far larger than memory.
 
 ```go
 f, err := os.Open("sample.wav")
@@ -112,35 +132,83 @@ if err != nil {
 	log.Fatal(err)
 }
 
-for _, chunk := range riffChunk.Payload {
-	if sub, ok := chunk.(riffbin.SubChunk); ok && sub.ChunkID() == riffbin.MustFourCC("data") {
+// Walk iterates the tree in depth-first document order; break stops the walk.
+for chunk := range riffbin.Walk(riffChunk) {
+	if sub, ok := chunk.(riffbin.SubChunk); ok && sub.ChunkID() == riffbin.MustParseFourCC("data") {
 		io.Copy(os.Stdout, sub.Body())
+		break
 	}
 }
 ```
 
 Malformed input produces a `*SyntaxError` wrapping `ErrInvalidFormat`, so
-`errors.Is(err, riffbin.ErrInvalidFormat)` still classifies it.
+`errors.Is(err, riffbin.ErrInvalidFormat)` still classifies it. An I/O failure of the
+underlying reader surfaces as the reader's own error — match it with `errors.Is` —
+and is never classified as a format error.
 
 ## Example 4: read files that do not follow the specification
 
 ```go
-// accept a missing pad byte after an odd-sized chunk (riffbin <= v0.0.6 wrote such files)
-riffChunk, err := riffbin.ReadFull(r, riffbin.AllowUnpaddedChunks())
+// accept omitted pad bytes after odd-sized chunks (riffbin <= v0.0.6 wrote such
+// files, and e.g. Apple CoreAudio still writes them)
+riffChunk, err := riffbin.ReadAll(r, riffbin.PadOmitted)
+
+// accept pad bytes holding garbage instead of zero
+riffChunk, err = riffbin.ReadAll(r, riffbin.PadGarbage)
 
 // ignore whatever follows the RIFF chunk
-riffChunk, err = riffbin.ReadFull(r, riffbin.AllowTrailingData())
+riffChunk, err = riffbin.ReadAll(r, riffbin.AllowTrailingData())
 ```
 
-## Example 5: RIFX (big-endian RIFF)
+## Example 5: read concatenated RIFF chunks
+
+A stream of concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the
+32-bit size field by appending `RIFF('AVIX')` chunks — is an iterator away:
+
+```go
+for riffChunk, err := range riffbin.Concatenated(r) {
+	if err != nil {
+		log.Fatal(err)
+	}
+	_ = riffChunk
+}
+```
+
+(`Concatenated` wraps calling `ReadAll` with `AllowTrailingData` until `io.EOF`,
+which remains available when each chunk needs different handling.)
+
+## Example 6: stream chunks without building a tree
+
+`Chunks` yields every chunk in document order as the input is scanned. No tree is
+built, memory stays proportional to the nesting depth, and breaking out of the
+loop stops reading — here neither the huge `data` body nor anything after `fmt `
+is ever loaded:
+
+```go
+for info, err := range riffbin.Chunks(f) {
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !info.Grouped() && info.ID == riffbin.MustParseFourCC("fmt") {
+		fmtBody, err := io.ReadAll(info.Body) // read before break: Body dies with the iteration
+		if err != nil {
+			log.Fatal(err)
+		}
+		_ = fmtBody
+		break
+	}
+}
+```
+
+## Example 7: RIFX (big-endian RIFF)
 
 Only the size fields change; four-character codes keep their order. The variant is
 detected when reading and recorded on the chunk, so a file round-trips byte for byte.
 
 ```go
-_, err := riffbin.NewCompletedChunkWriter(w).WriteChunk(&riffbin.RIFFChunk{
+_, err := riffbin.NewWriter(w).WriteChunk(&riffbin.RIFFChunk{
 	ByteOrder: riffbin.BigEndian,
-	FormType:  riffbin.MustFourCC("TEST"),
+	FormType:  riffbin.MustParseFourCC("TEST"),
 	Payload:   payload,
 })
 ```
@@ -155,21 +223,34 @@ _, err := riffbin.NewCompletedChunkWriter(w).WriteChunk(&riffbin.RIFFChunk{
 # Migrating from v0.1.0
 
 v0.2.0 fixes a parser that could not read a `LIST` containing sub-chunks via
-`ReadSections`, and reworks the API around the RIFF specification. The changes are
-mechanical:
+`ReadSections`, and reworks the API around the RIFF specification and the Go naming
+conventions. The changes are mechanical:
 
 | v0.1.0 | v0.2.0 |
 | --- | --- |
+| `ReadFull` | `ReadAll` — it reads everything into memory, like `io.ReadAll`; `io.ReadFull` means something else |
+| `PartialReader` | `ReadSeekerAt`, named for its abilities like `io.ReadWriteSeeker` |
+| `CompletedChunkWriter`, `NewCompletedChunkWriter` | `Writer`, `NewWriter` |
+| `IncompleteChunkWriter`, `NewIncompleteChunkWriter` | `StreamingWriter`, `NewStreamingWriter` |
+| `OnMemorySubChunk` | `InMemorySubChunk` |
+| `InStreamSubChunk` | `SectionSubChunk`, matching `ReadSections` and `io.SectionReader` |
+| `IncompleteSubChunk`, `NewIncompleteSubChunk` | `StreamingSubChunk`, `NewStreamingSubChunk` — the size is unknown, not the data broken |
+| `SubChunk.Incomplete()` | removed — a sub-chunk is streaming iff it is (or embeds) a `*StreamingSubChunk`, and the writers size it from the bytes its stream actually produces |
+| `ErrUnexpectedIncompleteChunk` | `ErrUnexpectedStreamingChunk` |
 | `Chunk.ChunkID() []byte` | `Chunk.ChunkID() FourCC` — compare with `==`, print with `%s` |
 | `Chunk.BodySize() uint32` | `Chunk.BodySize() int64` — sizes above 4 GiB now fail instead of wrapping |
 | `SubChunk` embeds `io.Reader` | `SubChunk.Body() io.Reader` — a fresh reader on every call |
 | `ChunkWriter.Write(*RIFFChunk)` | `ChunkWriter.WriteChunk(*RIFFChunk)` |
-| unexported grouped-chunk interface | exported `GroupedChunk` |
+| unexported grouped-chunk interface | exported `GroupedChunk`; its contained chunks are `Children()`, since the specification calls every nested chunk — a `LIST` included — a subchunk |
 | `err == riffbin.ErrInvalidFormat` | `errors.Is(err, riffbin.ErrInvalidFormat)` |
-| unpadded files read silently | pass `riffbin.AllowUnpaddedChunks()` |
+| an empty input was `ErrInvalidFormat` | it is `io.EOF`, the clean end of a chunk stream |
+| unpadded files read silently | pass `riffbin.PadOmitted`; `riffbin.PadGarbage` reads nonzero pad bytes instead — the two are values of one `PaddingPolicy`, so a conflicting combination is not expressible |
 
 Input that used to be accepted silently — a nested `RIFF` chunk, a non-ASCII chunk ID, a
 truncated body — is now rejected. The writers validate the tree before emitting anything:
-a tree the readers would not accept fails with `ErrInvalidChunk`, one above 4 GiB with
-`ErrChunkTooLarge`, and an already-consumed `IncompleteSubChunk` with
-`ErrConsumedIncompleteChunk`.
+a tree the readers would not accept fails with `ErrUnwritableChunk`, one above 4 GiB with
+`ErrChunkTooLarge`, and an already-consumed `StreamingSubChunk` — or one built over the
+same reader pointer as another chunk of the tree — with `ErrConsumedStreamingChunk`. A group's
+size on disk is always derived from its children, so a custom `GroupedChunk`
+misreporting `BodySize` no longer fails the write: the file simply carries the
+derived size.

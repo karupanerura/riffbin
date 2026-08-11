@@ -36,6 +36,8 @@ const (
 	BigEndian
 )
 
+// String returns the four-character container ID the byte order selects:
+// "RIFF" for LittleEndian and "RIFX" for BigEndian.
 func (o ByteOrder) String() string {
 	if o == BigEndian {
 		return "RIFX"
@@ -65,31 +67,39 @@ type Chunk interface {
 
 // GroupedChunk is a chunk whose body is a group type followed by other chunks.
 // RIFF and LIST are the grouped chunks defined by the specification.
+//
+// A group's size on disk is derived: the group type plus every child with its
+// header and its word-alignment pad byte. The writers compute it from
+// Children and never consult a group's BodySize, so a custom implementation
+// cannot desynchronize a group header from the bytes below it; the built-in
+// types compute BodySize the same way, for the caller's own arithmetic.
 type GroupedChunk interface {
 	Chunk
 
 	// GroupType is the four-character form type (RIFF) or list type (LIST).
 	GroupType() FourCC
 
-	// SubChunks are the chunks contained in this chunk.
-	SubChunks() []Chunk
+	// Children are the chunks contained in this chunk.
+	Children() []Chunk
 }
 
 // SubChunk is a leaf chunk carrying a byte payload.
+//
+// Body must produce exactly the BodySize the chunk declares; the writers
+// verify this and fail with ErrSizeMismatch. A payload of unknown length is
+// a *StreamingSubChunk instead — the writers recognize one by its type (or
+// by an embedded one) and size it from the bytes its stream produces.
 type SubChunk interface {
 	Chunk
 
-	// Body returns a reader over the chunk payload.
+	// Body returns a reader over the chunk payload. The writers call it once
+	// per WriteChunk, while planning the write; a nil reader is rejected
+	// there with ErrUnwritableChunk, before anything is written.
 	//
-	// A completed sub-chunk returns an independent reader on every call, so it can be
-	// written more than once. An incomplete sub-chunk returns the underlying stream,
-	// which can only be consumed once.
+	// A sub-chunk returns an independent reader on every call, so it can be
+	// written more than once. A *StreamingSubChunk returns its underlying
+	// stream instead, which can only be consumed once.
 	Body() io.Reader
-
-	// Incomplete returns true if the SubChunk payload is fluid, or not it returns false.
-	// Incomplete sub-chunk is only after the payload have been read that the BodySize is determined.
-	// Completed sub-chunk have a stable size of the payload.
-	Incomplete() bool
 }
 
 // groupBodySize is the body size of a grouped chunk: the group type plus every
@@ -103,7 +113,9 @@ func groupBodySize(payload []Chunk) (size int64) {
 	return
 }
 
-// RIFFChunk is a RIFF chunk. This is must be the root chunk.
+// RIFFChunk is the RIFF chunk, the root of the tree: its body is a form type
+// such as "WAVE" followed by every other chunk of the file. The specification
+// allows it only at the top level, so the writers reject a nested one.
 type RIFFChunk struct {
 	// ByteOrder selects a "RIFF" (LittleEndian, the zero value) or a "RIFX" (BigEndian) container.
 	ByteOrder ByteOrder
@@ -125,9 +137,11 @@ func (c *RIFFChunk) BodySize() int64 { return groupBodySize(c.Payload) }
 
 func (c *RIFFChunk) GroupType() FourCC { return c.FormType }
 
-func (c *RIFFChunk) SubChunks() []Chunk { return c.Payload }
+func (c *RIFFChunk) Children() []Chunk { return c.Payload }
 
-// ListChunk is a LIST chunk.
+// ListChunk is a LIST chunk: an ordered sequence of sub-chunks under a
+// four-character list type. LIST is the only chunk besides RIFF that the
+// specification allows to contain other chunks.
 type ListChunk struct {
 	ListType FourCC
 	Payload  []Chunk
@@ -141,81 +155,125 @@ func (c *ListChunk) BodySize() int64 { return groupBodySize(c.Payload) }
 
 func (c *ListChunk) GroupType() FourCC { return c.ListType }
 
-func (c *ListChunk) SubChunks() []Chunk { return c.Payload }
+func (c *ListChunk) Children() []Chunk { return c.Payload }
 
-// OnMemorySubChunk is a sub-chunk with the payload on memory.
-type OnMemorySubChunk struct {
+// InMemorySubChunk is a sub-chunk holding its payload in memory.
+type InMemorySubChunk struct {
 	ID      FourCC
 	Payload []byte
 }
 
-var _ SubChunk = (*OnMemorySubChunk)(nil)
+var _ SubChunk = (*InMemorySubChunk)(nil)
 
-func (c *OnMemorySubChunk) ChunkID() FourCC { return c.ID }
+func (c *InMemorySubChunk) ChunkID() FourCC { return c.ID }
 
-func (c *OnMemorySubChunk) BodySize() int64 { return int64(len(c.Payload)) }
+func (c *InMemorySubChunk) BodySize() int64 { return int64(len(c.Payload)) }
 
-func (c *OnMemorySubChunk) Incomplete() bool { return false }
+func (c *InMemorySubChunk) Body() io.Reader { return bytes.NewReader(c.Payload) }
 
-func (c *OnMemorySubChunk) Body() io.Reader { return bytes.NewReader(c.Payload) }
-
-// IncompleteSubChunk is a sub-chunk with the incomplete payload provided from io.Reader.
-type IncompleteSubChunk struct {
+// StreamingSubChunk is a sub-chunk whose payload comes from an io.Reader of
+// unknown length. Only StreamingWriter can write it: the size field is
+// not known until the reader has been drained.
+//
+// It is what makes a chunk streaming: the writers recognize a sub-chunk as
+// streaming iff it is a *StreamingSubChunk or embeds one (a custom type
+// needs a non-nil embedded pointer, or writing panics), and they size it
+// from the bytes its stream produces — nothing such a type reports can
+// desynchronize the size fields from the bytes actually written.
+type StreamingSubChunk struct {
 	id   FourCC
-	body incompleteChunkBody
+	body streamingChunkBody
 }
 
-var _ SubChunk = (*IncompleteSubChunk)(nil)
+var _ SubChunk = (*StreamingSubChunk)(nil)
 
-func NewIncompleteSubChunk(id FourCC, r io.Reader) *IncompleteSubChunk {
-	return &IncompleteSubChunk{id: id, body: incompleteChunkBody{reader: r}}
+// NewStreamingSubChunk returns a sub-chunk that streams its payload from r.
+// The length of r does not have to be known in advance: StreamingWriter
+// writes the payload through and fixes the size fields afterwards. A chunk
+// built over a nil r is rejected by the writers with ErrUnwritableChunk,
+// before anything is written; so is one built over an r another chunk of the
+// same tree already streams from, whose bytes the earlier chunk would have
+// drained. That check identifies r by pointer: a reader that is not one
+// cannot advance its own state, so equal copies of it are independent
+// streams — but a value merely wrapping a shared reader is not recognized.
+func NewStreamingSubChunk(id FourCC, r io.Reader) *StreamingSubChunk {
+	return &StreamingSubChunk{id: id, body: streamingChunkBody{reader: r}}
 }
 
-func (c *IncompleteSubChunk) ChunkID() FourCC { return c.id }
+func (c *StreamingSubChunk) ChunkID() FourCC { return c.id }
 
-func (c *IncompleteSubChunk) BodySize() int64 { return c.body.readLength }
+// BodySize is the number of bytes the stream has produced so far: zero
+// before the chunk is written, the final body size once it has been.
+func (c *StreamingSubChunk) BodySize() int64 { return c.body.readLength }
 
-func (c *IncompleteSubChunk) Incomplete() bool { return true }
+// Body returns the underlying stream, which can only be consumed once: any
+// read from it marks the chunk consumed — a later write fails with
+// ErrConsumedStreamingChunk — and the chunk knows its BodySize only after
+// the stream has been drained.
+func (c *StreamingSubChunk) Body() io.Reader { return &c.body }
 
-// Body returns the underlying stream. It can only be consumed once, and the chunk
-// only knows its BodySize after it has been consumed.
-func (c *IncompleteSubChunk) Body() io.Reader { return &c.body }
+func (c *StreamingSubChunk) streamingBody() *streamingChunkBody { return &c.body }
 
-type incompleteChunkBody struct {
+// streamer is how the writers recognize a streaming sub-chunk. Only
+// *StreamingSubChunk can carry the unexported method — a custom type becomes
+// streaming by embedding one — so every streaming body is library-owned: the
+// writers track duplication and consumption on the *streamingChunkBody
+// itself, drain it directly, and never depend on what an implementation
+// layered on top reports.
+type streamer interface {
+	streamingBody() *streamingChunkBody
+}
+
+// streamingChunkBody is the single-consumption stream of a StreamingSubChunk.
+// Any Read or WriteTo call marks it consumed — one producing no bytes
+// included — which is what the writers check: a byte count cannot tell a
+// drained empty stream from a fresh one.
+type streamingChunkBody struct {
 	readLength int64
+	consumed   bool
 	reader     io.Reader
 }
 
-func (c *incompleteChunkBody) Read(p []byte) (n int, err error) {
+func (c *streamingChunkBody) Read(p []byte) (n int, err error) {
+	c.consumed = true
 	n, err = c.reader.Read(p)
 	c.readLength += int64(n)
 	return
 }
 
-func (c *incompleteChunkBody) WriteTo(w io.Writer) (n int64, err error) {
-	n, err = io.Copy(w, c.reader)
-	c.readLength += n
-	return
+func (c *streamingChunkBody) WriteTo(w io.Writer) (n int64, err error) {
+	c.consumed = true
+	// count at the destination: io.Copy hands the copy to the reader's own
+	// WriteTo when it has one, and the count that call returns is its claim.
+	// readLength sizes the chunk in the output, so it holds the bytes that
+	// actually arrived, whatever the reader reported
+	cw := countingWriter{w: w}
+	_, err = io.Copy(&cw, c.reader)
+	c.readLength += cw.n
+	if err == nil {
+		// the destination's error is authoritative too: a reader's own
+		// WriteTo may swallow it, but the wrapper latched the first one
+		err = cw.firstErr
+	}
+	return cw.n, err
 }
 
-// InStreamSubChunk is a sub-chunk whose payload is a section of a seekable stream,
+// SectionSubChunk is a sub-chunk whose payload is a section of a seekable stream,
 // read on demand. ReadSections creates these; a hand-made value needs a non-nil
 // embedded *io.SectionReader, or BodySize and Body panic.
-type InStreamSubChunk struct {
+type SectionSubChunk struct {
 	ID FourCC
 	*io.SectionReader
 }
 
-var _ SubChunk = (*InStreamSubChunk)(nil)
+var _ SubChunk = (*SectionSubChunk)(nil)
 
-func (c *InStreamSubChunk) ChunkID() FourCC { return c.ID }
+func (c *SectionSubChunk) ChunkID() FourCC { return c.ID }
 
-func (c *InStreamSubChunk) BodySize() int64 { return c.SectionReader.Size() }
-
-func (c *InStreamSubChunk) Incomplete() bool { return false }
+func (c *SectionSubChunk) BodySize() int64 { return c.SectionReader.Size() }
 
 // Body returns an independent reader over the section, leaving the embedded
 // *io.SectionReader untouched so the chunk can be written repeatedly.
-func (c *InStreamSubChunk) Body() io.Reader {
+func (c *SectionSubChunk) Body() io.Reader {
 	return io.NewSectionReader(c.SectionReader, 0, c.SectionReader.Size())
 }

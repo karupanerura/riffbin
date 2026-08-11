@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/karupanerura/riffbin"
@@ -31,7 +32,7 @@ func flatten(t *testing.T, chunk riffbin.Chunk, prefix string, out *[]flatChunk)
 	case riffbin.GroupedChunk:
 		path += "(" + c.GroupType().String() + ")"
 		*out = append(*out, flatChunk{Path: path, ID: c.ChunkID().String()})
-		for _, cc := range c.SubChunks() {
+		for _, cc := range c.Children() {
 			flatten(t, cc, path, out)
 		}
 	case riffbin.SubChunk:
@@ -60,22 +61,22 @@ func flattenTree(t *testing.T, chunk riffbin.Chunk) []flatChunk {
 // chunks following a nested group, and odd-sized bodies that need a pad byte.
 func nestedListTree() *riffbin.RIFFChunk {
 	return &riffbin.RIFFChunk{
-		FormType: riffbin.MustFourCC("TEST"),
+		FormType: riffbin.MustParseFourCC("TEST"),
 		Payload: []riffbin.Chunk{
 			&riffbin.ListChunk{
-				ListType: riffbin.MustFourCC("LST1"),
+				ListType: riffbin.MustParseFourCC("LST1"),
 				Payload: []riffbin.Chunk{
-					&riffbin.OnMemorySubChunk{ID: riffbin.MustFourCC("ENT1"), Payload: []byte("abcd")},
+					&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT1"), Payload: []byte("abcd")},
 					&riffbin.ListChunk{
-						ListType: riffbin.MustFourCC("LST2"),
+						ListType: riffbin.MustParseFourCC("LST2"),
 						Payload: []riffbin.Chunk{
-							&riffbin.OnMemorySubChunk{ID: riffbin.MustFourCC("ENT2"), Payload: []byte("xyz")},
+							&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT2"), Payload: []byte("xyz")},
 						},
 					},
-					&riffbin.OnMemorySubChunk{ID: riffbin.MustFourCC("ENT3"), Payload: []byte("ijklm")},
+					&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT3"), Payload: []byte("ijklm")},
 				},
 			},
-			&riffbin.OnMemorySubChunk{ID: riffbin.MustFourCC("ENT4"), Payload: []byte("mnop")},
+			&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT4"), Payload: []byte("mnop")},
 		},
 	}
 }
@@ -87,19 +88,19 @@ func TestReadSectionsNestedList(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	if _, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(nestedListTree()); err != nil {
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(nestedListTree()); err != nil {
 		t.Fatal(err)
 	}
 	b := buf.Bytes()
 
 	expected := flattenTree(t, nestedListTree())
 
-	full, err := riffbin.ReadFull(bytes.NewReader(b))
+	full, err := riffbin.ReadAll(bytes.NewReader(b))
 	if err != nil {
-		t.Fatalf("ReadFull: %v", err)
+		t.Fatalf("ReadAll: %v", err)
 	}
 	if df := cmp.Diff(expected, flattenTree(t, full)); df != "" {
-		t.Errorf("ReadFull: diff = %s", df)
+		t.Errorf("ReadAll: diff = %s", df)
 	}
 
 	sections, err := riffbin.ReadSections(bytes.NewReader(b))
@@ -117,7 +118,7 @@ func TestReadersAgreeOnTruncatedInput(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	if _, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(nestedListTree()); err != nil {
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(nestedListTree()); err != nil {
 		t.Fatal(err)
 	}
 	b := buf.Bytes()
@@ -125,19 +126,25 @@ func TestReadersAgreeOnTruncatedInput(t *testing.T) {
 	for n := 0; n < len(b); n++ {
 		truncated := b[:n]
 
-		_, fullErr := riffbin.ReadFull(bytes.NewReader(truncated))
-		_, sectionsErr := riffbin.ReadSections(bytes.NewReader(truncated))
-		if !errors.Is(fullErr, riffbin.ErrInvalidFormat) {
-			t.Errorf("ReadFull(%d bytes): should be ErrInvalidFormat but got: %v", n, fullErr)
+		// truncation to nothing at all is a clean end of stream, not a malformed file
+		want := riffbin.ErrInvalidFormat
+		if n == 0 {
+			want = io.EOF
 		}
-		if !errors.Is(sectionsErr, riffbin.ErrInvalidFormat) {
-			t.Errorf("ReadSections(%d bytes): should be ErrInvalidFormat but got: %v", n, sectionsErr)
+
+		_, fullErr := riffbin.ReadAll(bytes.NewReader(truncated))
+		_, sectionsErr := riffbin.ReadSections(bytes.NewReader(truncated))
+		if !errors.Is(fullErr, want) {
+			t.Errorf("ReadAll(%d bytes): should be %v but got: %v", n, want, fullErr)
+		}
+		if !errors.Is(sectionsErr, want) {
+			t.Errorf("ReadSections(%d bytes): should be %v but got: %v", n, want, sectionsErr)
 		}
 	}
 }
 
 // A hostile size field must not be trusted enough to allocate against.
-func TestReadFullDoesNotAllocateDeclaredSize(t *testing.T) {
+func TestReadAllDoesNotAllocateDeclaredSize(t *testing.T) {
 	b := []byte{
 		'R', 'I', 'F', 'F',
 		0xF0, 0xFF, 0xFF, 0xFF, // root body size: nearly 4 GiB
@@ -149,7 +156,7 @@ func TestReadFullDoesNotAllocateDeclaredSize(t *testing.T) {
 
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+	if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 		t.Fatalf("should be ErrInvalidFormat but got: %v", err)
 	}
 	runtime.ReadMemStats(&after)
@@ -179,7 +186,7 @@ func TestReadDeeplyNestedList(t *testing.T) {
 	b = append(b, body...)
 
 	for name, read := range map[string]func([]byte) error{
-		"ReadFull":     func(b []byte) error { _, err := riffbin.ReadFull(bytes.NewReader(b)); return err },
+		"ReadAll":      func(b []byte) error { _, err := riffbin.ReadAll(bytes.NewReader(b)); return err },
 		"ReadSections": func(b []byte) error { _, err := riffbin.ReadSections(bytes.NewReader(b)); return err },
 	} {
 		name, read := name, read
@@ -199,16 +206,18 @@ func TestReadRejectsSpecViolations(t *testing.T) {
 		Name  string
 		Bytes []byte
 	}{
+		// the root sizes match the content exactly: an oversized root would trip
+		// ReadSections' input-length check before the check each case is named for
 		{"NestedRIFFChunk", []byte{
-			'R', 'I', 'F', 'F', 0x14, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+			'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 			'R', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'N', 'E', 'S', 'T',
 		}},
 		{"NestedRIFXChunk", []byte{
-			'R', 'I', 'F', 'F', 0x14, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+			'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 			'R', 'I', 'F', 'X', 0x04, 0x00, 0x00, 0x00, 'N', 'E', 'S', 'T',
 		}},
 		{"NonASCIIChunkID", []byte{
-			'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+			'R', 'I', 'F', 'F', 0x0C, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 			'E', 'N', 'T', 0x00, 0x00, 0x00, 0x00, 0x00,
 		}},
 		{"NonASCIIFormType", []byte{
@@ -225,13 +234,79 @@ func TestReadRejectsSpecViolations(t *testing.T) {
 		tt := tt
 		t.Run(tt.Name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := riffbin.ReadFull(bytes.NewReader(tt.Bytes)); !errors.Is(err, riffbin.ErrInvalidFormat) {
-				t.Errorf("ReadFull should be ErrInvalidFormat but got: %v", err)
+			if _, err := riffbin.ReadAll(bytes.NewReader(tt.Bytes)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("ReadAll should be ErrInvalidFormat but got: %v", err)
 			}
 			if _, err := riffbin.ReadSections(bytes.NewReader(tt.Bytes)); !errors.Is(err, riffbin.ErrInvalidFormat) {
 				t.Errorf("ReadSections should be ErrInvalidFormat but got: %v", err)
 			}
 		})
+	}
+}
+
+// A grouped chunk's body starts with its four-byte group type, so a LIST declaring
+// fewer than four bytes cannot even hold its type, and one declaring four to eleven
+// bytes has no room left for a complete sub-chunk header.
+func TestListTooSmallForItsParts(t *testing.T) {
+	t.Parallel()
+
+	build := func(listBody []byte) []byte {
+		b := []byte{'R', 'I', 'F', 'F'}
+		b = binary.LittleEndian.AppendUint32(b, uint32(4+riffbin.HeaderBytes+len(listBody)))
+		b = append(b, "TEST"...)
+		b = append(b, "LIST"...)
+		b = binary.LittleEndian.AppendUint32(b, uint32(len(listBody)))
+		return append(b, listBody...)
+	}
+
+	for n := 0; n < riffbin.TypeBytes; n++ {
+		n := n
+		t.Run(fmt.Sprintf("TooShortForGroupType%d", n), func(t *testing.T) {
+			t.Parallel()
+			b := build([]byte("LST1")[:n])
+			if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("ReadAll should be ErrInvalidFormat but got: %v", err)
+			}
+			if _, err := riffbin.ReadSections(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("ReadSections should be ErrInvalidFormat but got: %v", err)
+			}
+		})
+	}
+
+	for n := 1; n < riffbin.HeaderBytes; n++ {
+		n := n
+		t.Run(fmt.Sprintf("TooShortForSubChunkHeader%d", n), func(t *testing.T) {
+			t.Parallel()
+			b := build(append([]byte("LST1"), []byte("ENT1\x00\x00\x00\x00")[:n]...))
+			if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("ReadAll should be ErrInvalidFormat but got: %v", err)
+			}
+			if _, err := riffbin.ReadSections(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("ReadSections should be ErrInvalidFormat but got: %v", err)
+			}
+		})
+	}
+}
+
+// ReadSections must read a RIFF chunk embedded at a non-zero offset: every boundary
+// is relative to the position the reader was handed at, not to the start of the file.
+func TestReadSectionsFromNonZeroOffset(t *testing.T) {
+	t.Parallel()
+
+	prefix := []byte("leading garbage.")
+	b := append(append([]byte{}, prefix...), paddedFileBytes...)
+
+	r := bytes.NewReader(b)
+	if _, err := r.Seek(int64(len(prefix)), io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := riffbin.ReadSections(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if df := cmp.Diff(flattenTree(t, paddedFileChunk()), flattenTree(t, got)); df != "" {
+		t.Errorf("diff = %s", df)
 	}
 }
 
@@ -242,12 +317,142 @@ func TestAllowTrailingData(t *testing.T) {
 		'R', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T', 'j', 'u', 'n', 'k',
 	}
 
-	got, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowTrailingData())
+	got, err := riffbin.ReadAll(bytes.NewReader(b), riffbin.AllowTrailingData())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.FormType != riffbin.MustFourCC("TEST") {
+	if got.FormType != riffbin.MustParseFourCC("TEST") {
 		t.Errorf("unexpected form type: %s", got.FormType)
+	}
+}
+
+// A stream of concatenated RIFF chunks — the layout AVI 2.0 uses to grow past the
+// 32-bit size field by appending RIFF("AVIX") chunks — is read by calling a reader
+// repeatedly with AllowTrailingData: each call consumes exactly one root chunk, and
+// the end of the stream is io.EOF.
+func TestReadConcatenatedRIFFChunks(t *testing.T) {
+	t.Parallel()
+
+	concatenated := append(append([]byte{}, paddedFileBytes...), paddedFileBytes...)
+	expected := flattenTree(t, paddedFileChunk())
+
+	t.Run("ReadAll", func(t *testing.T) {
+		t.Parallel()
+
+		r := bytes.NewReader(concatenated)
+		for i := 0; i < 2; i++ {
+			got, err := riffbin.ReadAll(r, riffbin.AllowTrailingData())
+			if err != nil {
+				t.Fatalf("chunk %d: %v", i, err)
+			}
+			if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+				t.Errorf("chunk %d: diff = %s", i, df)
+			}
+		}
+		if _, err := riffbin.ReadAll(r, riffbin.AllowTrailingData()); !errors.Is(err, io.EOF) {
+			t.Errorf("should be io.EOF at the end of the stream but got: %v", err)
+		}
+	})
+
+	t.Run("ReadSections", func(t *testing.T) {
+		t.Parallel()
+
+		r := bytes.NewReader(concatenated)
+		for i := 0; i < 2; i++ {
+			got, err := riffbin.ReadSections(r, riffbin.AllowTrailingData())
+			if err != nil {
+				t.Fatalf("chunk %d: %v", i, err)
+			}
+			if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+				t.Errorf("chunk %d: diff = %s", i, df)
+			}
+		}
+		if _, err := riffbin.ReadSections(r, riffbin.AllowTrailingData()); !errors.Is(err, io.EOF) {
+			t.Errorf("should be io.EOF at the end of the stream but got: %v", err)
+		}
+	})
+}
+
+// A writer that pads its odd-sized final chunk without counting the pad byte in the
+// RIFF size leaves a 0x00 between the chunks of a concatenated stream — the byte
+// verifyEnd tolerates after a single chunk. AllowTrailingData must skip it, or the
+// next call starts at the pad byte and misreads the root chunk header.
+func TestReadConcatenatedRIFFChunksWithUncountedPad(t *testing.T) {
+	t.Parallel()
+
+	// the RIFF size 0x0F does not count ENT1's pad byte, so the trailing 0x00
+	// lies outside the declared root chunk body
+	padded := []byte{
+		'R', 'I', 'F', 'F', 0x0F, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0x00,
+	}
+	// the same chunk from a writer that omits the pad byte entirely: the next
+	// header follows the odd body directly and must not lose its first byte
+	unpadded := padded[:len(padded)-1]
+	expected := flattenTree(t, &riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{&riffbin.InMemorySubChunk{ID: riffbin.MustParseFourCC("ENT1"), Payload: []byte("abc")}},
+	})
+
+	streams := map[string][]byte{
+		"UncountedPads": append(append([]byte{}, padded...), padded...),
+		"NoPads":        append(append([]byte{}, unpadded...), unpadded...),
+		"PadThenNoPad":  append(append([]byte{}, padded...), unpadded...),
+	}
+
+	for name, stream := range streams {
+		name, stream := name, stream
+		t.Run("ReadAll/"+name, func(t *testing.T) {
+			t.Parallel()
+
+			r := bytes.NewReader(stream)
+			for i := 0; i < 2; i++ {
+				got, err := riffbin.ReadAll(r, riffbin.AllowTrailingData())
+				if err != nil {
+					t.Fatalf("chunk %d: %v", i, err)
+				}
+				if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+					t.Errorf("chunk %d: diff = %s", i, df)
+				}
+			}
+			if _, err := riffbin.ReadAll(r, riffbin.AllowTrailingData()); !errors.Is(err, io.EOF) {
+				t.Errorf("should be io.EOF at the end of the stream but got: %v", err)
+			}
+		})
+		t.Run("ReadSections/"+name, func(t *testing.T) {
+			t.Parallel()
+
+			r := bytes.NewReader(stream)
+			for i := 0; i < 2; i++ {
+				got, err := riffbin.ReadSections(r, riffbin.AllowTrailingData())
+				if err != nil {
+					t.Fatalf("chunk %d: %v", i, err)
+				}
+				if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+					t.Errorf("chunk %d: diff = %s", i, df)
+				}
+			}
+			if _, err := riffbin.ReadSections(r, riffbin.AllowTrailingData()); !errors.Is(err, io.EOF) {
+				t.Errorf("should be io.EOF at the end of the stream but got: %v", err)
+			}
+		})
+		t.Run("Concatenated/"+name, func(t *testing.T) {
+			t.Parallel()
+
+			n := 0
+			for got, err := range riffbin.Concatenated(bytes.NewReader(stream)) {
+				if err != nil {
+					t.Fatalf("chunk %d: %v", n, err)
+				}
+				if df := cmp.Diff(expected, flattenTree(t, got)); df != "" {
+					t.Errorf("chunk %d: diff = %s", n, df)
+				}
+				n++
+			}
+			if n != 2 {
+				t.Errorf("should yield 2 chunks but got: %d", n)
+			}
+		})
 	}
 }
 
@@ -259,7 +464,7 @@ func TestReadUnsupportedContainers(t *testing.T) {
 		t.Run(id, func(t *testing.T) {
 			t.Parallel()
 			b := append([]byte(id), 0x04, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E')
-			if _, err := riffbin.ReadFull(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrUnsupportedFormat) {
+			if _, err := riffbin.ReadAll(bytes.NewReader(b)); !errors.Is(err, riffbin.ErrUnsupportedFormat) {
 				t.Errorf("should be ErrUnsupportedFormat but got: %v", err)
 			}
 		})
@@ -275,7 +480,7 @@ func TestSyntaxErrorReportsPosition(t *testing.T) {
 		'E', 'N', 'T', 0x00, 0x00, 0x00, 0x00, 0x00, // the chunk ID at offset 24 is not ASCII
 	}
 
-	_, err := riffbin.ReadFull(bytes.NewReader(b))
+	_, err := riffbin.ReadAll(bytes.NewReader(b))
 
 	var syntaxErr *riffbin.SyntaxError
 	if !errors.As(err, &syntaxErr) {
@@ -300,7 +505,6 @@ type oversizedSubChunk struct {
 
 func (c *oversizedSubChunk) ChunkID() riffbin.FourCC { return c.id }
 func (c *oversizedSubChunk) BodySize() int64         { return c.size }
-func (c *oversizedSubChunk) Incomplete() bool        { return false }
 func (c *oversizedSubChunk) Body() io.Reader         { return strings.NewReader("") }
 
 // shortSubChunk produces fewer bytes than it declares.
@@ -310,18 +514,77 @@ type shortSubChunk struct {
 
 func (c *shortSubChunk) ChunkID() riffbin.FourCC { return c.id }
 func (c *shortSubChunk) BodySize() int64         { return 10 }
-func (c *shortSubChunk) Incomplete() bool        { return false }
 func (c *shortSubChunk) Body() io.Reader         { return strings.NewReader("abc") }
+
+// A Chunk implementation reporting a negative body size cannot be encoded; the
+// writers reject the tree before writing anything.
+func TestWriteRejectsNegativeBodySize(t *testing.T) {
+	t.Parallel()
+
+	_, err := riffbin.NewWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload: []riffbin.Chunk{
+			&oversizedSubChunk{id: riffbin.MustParseFourCC("ENT1"), size: -1},
+		},
+	})
+	if !errors.Is(err, riffbin.ErrSizeMismatch) {
+		t.Errorf("should be ErrSizeMismatch but got: %v", err)
+	}
+}
+
+// An I/O failure of the underlying reader is not a format defect: it must surface
+// as-is, never classified as ErrInvalidFormat, at whatever position it strikes.
+func TestReadPropagatesIOError(t *testing.T) {
+	t.Parallel()
+
+	errDisk := errors.New("injected read failure")
+
+	// positions: the root header, the form type, a sub-chunk header, a sub-chunk
+	// body, and the end-of-input probe after the root chunk
+	for _, n := range []int{0, 8, 12, 20, len(paddedFileBytes)} {
+		n := n
+		t.Run(fmt.Sprintf("After%dBytes", n), func(t *testing.T) {
+			t.Parallel()
+			r := io.MultiReader(bytes.NewReader(paddedFileBytes[:n]), iotest.ErrReader(errDisk))
+			_, err := riffbin.ReadAll(r)
+			if !errors.Is(err, errDisk) {
+				t.Errorf("the underlying error should be preserved but got: %v", err)
+			}
+			if errors.Is(err, riffbin.ErrInvalidFormat) {
+				t.Errorf("an I/O error must not be a format error: %v", err)
+			}
+		})
+	}
+
+	t.Run("SeekError", func(t *testing.T) {
+		t.Parallel()
+		_, err := riffbin.ReadSections(&failingSeeker{ReadSeekerAt: bytes.NewReader(paddedFileBytes), err: errDisk})
+		if !errors.Is(err, errDisk) {
+			t.Errorf("the underlying error should be preserved but got: %v", err)
+		}
+		if errors.Is(err, riffbin.ErrInvalidFormat) {
+			t.Errorf("an I/O error must not be a format error: %v", err)
+		}
+	})
+}
+
+// failingSeeker fails every Seek call.
+type failingSeeker struct {
+	riffbin.ReadSeekerAt
+	err error
+}
+
+func (f *failingSeeker) Seek(offset int64, whence int) (int64, error) { return 0, f.err }
 
 func TestWriteRejectsOversizedChunk(t *testing.T) {
 	t.Parallel()
 
 	t.Run("SubChunk", func(t *testing.T) {
 		t.Parallel()
-		_, err := riffbin.NewCompletedChunkWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
-			FormType: riffbin.MustFourCC("TEST"),
+		_, err := riffbin.NewWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
+			FormType: riffbin.MustParseFourCC("TEST"),
 			Payload: []riffbin.Chunk{
-				&oversizedSubChunk{id: riffbin.MustFourCC("ENT1"), size: riffbin.MaxBodySize + 1},
+				&oversizedSubChunk{id: riffbin.MustParseFourCC("ENT1"), size: riffbin.MaxBodySize + 1},
 			},
 		})
 		if !errors.Is(err, riffbin.ErrChunkTooLarge) {
@@ -332,11 +595,11 @@ func TestWriteRejectsOversizedChunk(t *testing.T) {
 	// the sum of the payload overflows even though no single chunk does
 	t.Run("Group", func(t *testing.T) {
 		t.Parallel()
-		_, err := riffbin.NewCompletedChunkWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
-			FormType: riffbin.MustFourCC("TEST"),
+		_, err := riffbin.NewWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
+			FormType: riffbin.MustParseFourCC("TEST"),
 			Payload: []riffbin.Chunk{
-				&oversizedSubChunk{id: riffbin.MustFourCC("ENT1"), size: 3 << 30},
-				&oversizedSubChunk{id: riffbin.MustFourCC("ENT2"), size: 3 << 30},
+				&oversizedSubChunk{id: riffbin.MustParseFourCC("ENT1"), size: 3 << 30},
+				&oversizedSubChunk{id: riffbin.MustParseFourCC("ENT2"), size: 3 << 30},
 			},
 		})
 		if !errors.Is(err, riffbin.ErrChunkTooLarge) {
@@ -352,9 +615,9 @@ func TestWriteRejectsOversizedChunk(t *testing.T) {
 func TestWriteRejectsShortBody(t *testing.T) {
 	t.Parallel()
 
-	_, err := riffbin.NewCompletedChunkWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
-		FormType: riffbin.MustFourCC("TEST"),
-		Payload:  []riffbin.Chunk{&shortSubChunk{id: riffbin.MustFourCC("ENT1")}},
+	_, err := riffbin.NewWriter(io.Discard).WriteChunk(&riffbin.RIFFChunk{
+		FormType: riffbin.MustParseFourCC("TEST"),
+		Payload:  []riffbin.Chunk{&shortSubChunk{id: riffbin.MustParseFourCC("ENT1")}},
 	})
 	if !errors.Is(err, riffbin.ErrSizeMismatch) {
 		t.Errorf("should be ErrSizeMismatch but got: %v", err)
@@ -366,15 +629,15 @@ func TestWriteRejectsShortBody(t *testing.T) {
 func TestWriteIsRepeatable(t *testing.T) {
 	t.Parallel()
 
-	t.Run("OnMemorySubChunk", func(t *testing.T) {
+	t.Run("InMemorySubChunk", func(t *testing.T) {
 		t.Parallel()
 		chunk := nestedListTree()
 
 		var first, second bytes.Buffer
-		if _, err := riffbin.NewCompletedChunkWriter(&first).WriteChunk(chunk); err != nil {
+		if _, err := riffbin.NewWriter(&first).WriteChunk(chunk); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := riffbin.NewCompletedChunkWriter(&second).WriteChunk(chunk); err != nil {
+		if _, err := riffbin.NewWriter(&second).WriteChunk(chunk); err != nil {
 			t.Fatal(err)
 		}
 		if df := cmp.Diff(first.Bytes(), second.Bytes()); df != "" {
@@ -382,11 +645,11 @@ func TestWriteIsRepeatable(t *testing.T) {
 		}
 	})
 
-	t.Run("InStreamSubChunk", func(t *testing.T) {
+	t.Run("SectionSubChunk", func(t *testing.T) {
 		t.Parallel()
 
 		var buf bytes.Buffer
-		if _, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(nestedListTree()); err != nil {
+		if _, err := riffbin.NewWriter(&buf).WriteChunk(nestedListTree()); err != nil {
 			t.Fatal(err)
 		}
 		original := buf.Bytes()
@@ -398,7 +661,7 @@ func TestWriteIsRepeatable(t *testing.T) {
 
 		for i := 0; i < 2; i++ {
 			var out bytes.Buffer
-			if _, err := riffbin.NewCompletedChunkWriter(&out).WriteChunk(chunk); err != nil {
+			if _, err := riffbin.NewWriter(&out).WriteChunk(chunk); err != nil {
 				t.Fatalf("write %d: %v", i, err)
 			}
 			if df := cmp.Diff(original, out.Bytes()); df != "" {
@@ -409,7 +672,7 @@ func TestWriteIsRepeatable(t *testing.T) {
 }
 
 func ExampleSyntaxError() {
-	_, err := riffbin.ReadFull(bytes.NewReader([]byte{
+	_, err := riffbin.ReadAll(bytes.NewReader([]byte{
 		'R', 'I', 'F', 'F', 0x0C, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 		'E', 'N', 'T', 0x00, 0x00, 0x00, 0x00, 0x00,
 	}))

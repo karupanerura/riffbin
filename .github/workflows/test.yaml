@@ -14,9 +14,7 @@ jobs:
     strategy:
       matrix:
         go:
-          # the floor the go directive promises, then every release Go still supports
-          - "1.21.x"
-          - "1.25.x"
+          # the floor the go directive promises; also the newest release right now
           - "1.26.x"
     name: Go ${{ matrix.go }}
     steps:
@@ -39,9 +37,15 @@ jobs:
       - run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
       - name: fuzz smoke test
         run: |
-          for target in FuzzReadFull FuzzReadSections FuzzReadFullLenient; do
+          # `go test -fuzz` exits zero when the pattern matches nothing,
+          # so verify each target exists before fuzzing it
+          for target in FuzzReadAll FuzzReadSections FuzzReadAllLenient FuzzReadersAgree; do
+            go test -list="^${target}\$" . | grep -q "^${target}\$" || { echo "no such fuzz target: ${target}"; exit 1; }
             go test -run=XXX -fuzz="^${target}\$" -fuzztime=20s .
           done
+      - name: benchmark smoke test
+        # one iteration each, so the benchmarks backing the README/PR numbers cannot rot
+        run: go test -run=XXX -bench=. -benchtime=1x .
       - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: ./coverage.out

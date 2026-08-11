@@ -3,6 +3,9 @@ package riffbin_test
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -30,7 +33,7 @@ var fuzzSeeds = [][]byte{
 	},
 	// a nested RIFF chunk, which the specification does not allow
 	{
-		'R', 'I', 'F', 'F', 0x14, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 		'R', 'I', 'F', 'F', 0x04, 0x00, 0x00, 0x00, 'N', 'E', 'S', 'T',
 	},
 	// an odd-sized chunk with its pad byte
@@ -38,14 +41,42 @@ var fuzzSeeds = [][]byte{
 		'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
 		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0x00,
 	},
+	// a concatenated-stream fragment: the uncounted pad byte of a previous chunk,
+	// then a complete RIFF chunk (read with AllowTrailingData, rejected without)
+	{
+		0x00,
+		'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0x00,
+	},
+	// an odd-sized chunk whose pad byte holds garbage
+	{
+		'R', 'I', 'F', 'F', 0x10, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 0xFF,
+	},
 	// big-endian RIFX
 	{
 		'R', 'I', 'F', 'X', 0x00, 0x00, 0x00, 0x10, 'T', 'E', 'S', 'T',
 		'E', 'N', 'T', '1', 0x00, 0x00, 0x00, 0x03, 'a', 'b', 'c', 0x00,
 	},
+	// big-endian RIFX without the pad byte after an odd-sized chunk
+	{
+		'R', 'I', 'F', 'X', 0x00, 0x00, 0x00, 0x1B, 'T', 'E', 'S', 'T',
+		'E', 'N', 'T', '1', 0x00, 0x00, 0x00, 0x03, 'a', 'b', 'c',
+		'E', 'N', 'T', '2', 0x00, 0x00, 0x00, 0x04, 'w', 'x', 'y', 'z',
+	},
+	// an odd-sized chunk inside an odd-sized LIST, both without pad bytes
+	{
+		'R', 'I', 'F', 'F', 0x27, 0x00, 0x00, 0x00, 'T', 'E', 'S', 'T',
+		'L', 'I', 'S', 'T', 0x0F, 0x00, 0x00, 0x00, 'L', 'S', 'T', '1',
+		'E', 'N', 'T', '1', 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c',
+		'E', 'N', 'T', '2', 0x04, 0x00, 0x00, 0x00, 'w', 'x', 'y', 'z',
+	},
 	// unsupported containers
 	{'R', 'F', '6', '4', 0x04, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E'},
 	{'B', 'W', '6', '4', 0x04, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E'},
+	// an unpadded file that the garbage-padding policy reads as a different,
+	// complete tree (TestOmittedPadIsAmbiguous)
+	ambiguousUnpaddedFile,
 }
 
 // checkRoundTrip verifies that a tree that could be read is also writable, and that
@@ -54,12 +85,12 @@ func checkRoundTrip(t *testing.T, in []byte, chunk *riffbin.RIFFChunk) {
 	t.Helper()
 
 	var buf bytes.Buffer
-	if _, err := riffbin.NewCompletedChunkWriter(&buf).WriteChunk(chunk); err != nil {
+	if _, err := riffbin.NewWriter(&buf).WriteChunk(chunk); err != nil {
 		t.Log(hex.Dump(in))
 		t.Fatalf("write back: %v", err)
 	}
 
-	again, err := riffbin.ReadFull(bytes.NewReader(buf.Bytes()))
+	again, err := riffbin.ReadAll(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Log(hex.Dump(in))
 		t.Log(hex.Dump(buf.Bytes()))
@@ -72,12 +103,12 @@ func checkRoundTrip(t *testing.T, in []byte, chunk *riffbin.RIFFChunk) {
 	}
 }
 
-func FuzzReadFull(f *testing.F) {
+func FuzzReadAll(f *testing.F) {
 	for _, seed := range fuzzSeeds {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		c, err := riffbin.ReadFull(bytes.NewReader(b))
+		c, err := riffbin.ReadAll(bytes.NewReader(b))
 		if (c == nil) == (err == nil) {
 			t.Log(hex.Dump(b))
 			t.Fatal("invalid result")
@@ -104,20 +135,147 @@ func FuzzReadSections(f *testing.F) {
 	})
 }
 
-func FuzzReadFullLenient(f *testing.F) {
+// readerModes is the complete legal option space: every padding policy, with
+// and without AllowTrailingData. Each differential test and fuzz target
+// iterates all of it, so no combination escapes the harness — a rule that
+// only runs in one mode (like the end-of-chunk probe, which AllowTrailingData
+// short-circuits) is still exercised in the modes where it runs.
+var readerModes = []struct {
+	name string
+	opts []riffbin.ReaderOption
+}{
+	{name: "strict"},
+	{name: "padOmitted", opts: []riffbin.ReaderOption{riffbin.PadOmitted}},
+	{name: "padGarbage", opts: []riffbin.ReaderOption{riffbin.PadGarbage}},
+	{name: "trailing", opts: []riffbin.ReaderOption{riffbin.AllowTrailingData()}},
+	{name: "padOmitted+trailing", opts: []riffbin.ReaderOption{riffbin.PadOmitted, riffbin.AllowTrailingData()}},
+	{name: "padGarbage+trailing", opts: []riffbin.ReaderOption{riffbin.PadGarbage, riffbin.AllowTrailingData()}},
+}
+
+func FuzzReadAllLenient(f *testing.F) {
 	for _, seed := range fuzzSeeds {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		c, err := riffbin.ReadFull(bytes.NewReader(b), riffbin.AllowUnpaddedChunks(), riffbin.AllowTrailingData())
-		if (c == nil) == (err == nil) {
-			t.Log(hex.Dump(b))
-			t.Fatal("invalid result")
+		for _, mode := range readerModes {
+			c, err := riffbin.ReadAll(bytes.NewReader(b), mode.opts...)
+			if (c == nil) == (err == nil) {
+				t.Log(hex.Dump(b))
+				t.Fatal("invalid result")
+			}
+			// a leniently-read tree must still write back as a compliant file
+			// that re-reads strictly to the same tree
+			if c != nil {
+				checkRoundTrip(t, b, c)
+			}
 		}
-		// a leniently-read tree must still write back as a compliant file that
-		// re-reads strictly to the same tree
-		if c != nil {
-			checkRoundTrip(t, b, c)
+	})
+}
+
+// chunksFlatten consumes the streaming parser into the same flat form as
+// flattenTree, keeping the chunks yielded before an error alongside the error
+// itself — so two parser paths can be compared moment by moment, not only on
+// their verdicts.
+func chunksFlatten(t *testing.T, r io.Reader, opts ...riffbin.ReaderOption) ([]flatChunk, error) {
+	t.Helper()
+
+	var out []flatChunk
+	var path []string
+	for info, err := range riffbin.Chunks(r, opts...) {
+		if err != nil {
+			return out, err
+		}
+		name := info.ID.String()
+		if info.Grouped() {
+			name += "(" + info.GroupType.String() + ")"
+		}
+		path = append(path[:info.Depth], name)
+
+		fc := flatChunk{Path: "/" + strings.Join(path, "/"), ID: info.ID.String()}
+		if !info.Grouped() {
+			body, err := io.ReadAll(info.Body)
+			if err != nil {
+				return out, err
+			}
+			if int64(len(body)) != info.BodySize {
+				t.Errorf("%s: BodySize is %d but the body holds %d byte(s)", fc.Path, info.BodySize, len(body))
+			}
+			fc.Body = string(body)
+		}
+		out = append(out, fc)
+	}
+	return out, nil
+}
+
+// errText renders an error for path-identity comparison; nil is "".
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// Whatever the input, every reader must agree: the tree readers, the streaming
+// parser reading through, and the streaming parser skipping by seeking all
+// accept or all reject, and on success they yield the same chunks. The two
+// parser paths are held to more: the identical event sequence, the error and
+// its reported position included — seeking is an optimization, not a second
+// parser. This pins every reader to a single definition of the format, across
+// the entire option space.
+func FuzzReadersAgree(f *testing.F) {
+	for _, seed := range fuzzSeeds {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, b []byte) {
+		for _, mode := range readerModes {
+			full, fullErr := riffbin.ReadAll(bytes.NewReader(b), mode.opts...)
+			sections, sectionsErr := riffbin.ReadSections(bytes.NewReader(b), mode.opts...)
+			streamed, streamedErr := chunksFlatten(t, struct{ io.Reader }{bytes.NewReader(b)}, mode.opts...)
+			seeked, seekedErr := chunksFlatten(t, bytes.NewReader(b), mode.opts...)
+
+			// the read-through and the seeking path must match event for event,
+			// error text — position and path included — and all
+			if df := cmp.Diff(streamed, seeked); df != "" {
+				t.Log(hex.Dump(b))
+				t.Fatalf("%s: the parser paths yield different chunks: %s", mode.name, df)
+			}
+			if errText(streamedErr) != errText(seekedErr) {
+				t.Log(hex.Dump(b))
+				t.Fatalf("%s: the parser paths report different errors:\n  read-through: %v\n  seeking:      %v", mode.name, streamedErr, seekedErr)
+			}
+
+			// the readers must agree not only on accept/reject but on the kind of
+			// rejection: a format error for one must not be clean EOF for another
+			errKind := func(err error) string {
+				switch {
+				case err == nil:
+					return "accepted"
+				case errors.Is(err, riffbin.ErrInvalidFormat):
+					return "invalid format"
+				case errors.Is(err, riffbin.ErrUnsupportedFormat):
+					return "unsupported format"
+				case errors.Is(err, io.EOF):
+					return "clean EOF"
+				default:
+					return "other"
+				}
+			}
+			for name, err := range map[string]error{"ReadSections": sectionsErr, "Chunks": streamedErr, "Chunks(seeking)": seekedErr} {
+				if errKind(fullErr) != errKind(err) {
+					t.Log(hex.Dump(b))
+					t.Fatalf("%s: the readers disagree: ReadAll=%v %s=%v", mode.name, fullErr, name, err)
+				}
+			}
+			if fullErr != nil {
+				continue
+			}
+			reference := flattenTree(t, full)
+			for name, got := range map[string][]flatChunk{"ReadSections": flattenTree(t, sections), "Chunks": streamed, "Chunks(seeking)": seeked} {
+				if df := cmp.Diff(reference, got); df != "" {
+					t.Log(hex.Dump(b))
+					t.Fatalf("%s: %s disagrees on the chunks: %s", mode.name, name, df)
+				}
+			}
 		}
 	})
 }
