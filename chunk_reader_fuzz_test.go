@@ -173,7 +173,9 @@ func FuzzReadAllLenient(f *testing.F) {
 }
 
 // chunksFlatten consumes the streaming parser into the same flat form as
-// flattenTree, so it can be compared with the tree readers.
+// flattenTree, keeping the chunks yielded before an error alongside the error
+// itself — so two parser paths can be compared moment by moment, not only on
+// their verdicts.
 func chunksFlatten(t *testing.T, r io.Reader, opts ...riffbin.ReaderOption) ([]flatChunk, error) {
 	t.Helper()
 
@@ -181,7 +183,7 @@ func chunksFlatten(t *testing.T, r io.Reader, opts ...riffbin.ReaderOption) ([]f
 	var path []string
 	for info, err := range riffbin.Chunks(r, opts...) {
 		if err != nil {
-			return nil, err
+			return out, err
 		}
 		name := info.ID.String()
 		if info.Grouped() {
@@ -193,7 +195,7 @@ func chunksFlatten(t *testing.T, r io.Reader, opts ...riffbin.ReaderOption) ([]f
 		if !info.Grouped() {
 			body, err := io.ReadAll(info.Body)
 			if err != nil {
-				return nil, err
+				return out, err
 			}
 			if int64(len(body)) != info.BodySize {
 				t.Errorf("%s: BodySize is %d but the body holds %d byte(s)", fc.Path, info.BodySize, len(body))
@@ -205,10 +207,21 @@ func chunksFlatten(t *testing.T, r io.Reader, opts ...riffbin.ReaderOption) ([]f
 	return out, nil
 }
 
+// errText renders an error for path-identity comparison; nil is "".
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 // Whatever the input, every reader must agree: the tree readers, the streaming
 // parser reading through, and the streaming parser skipping by seeking all
-// accept or all reject, and on success they yield the same chunks. This pins
-// them to a single definition of the format, across the entire option space.
+// accept or all reject, and on success they yield the same chunks. The two
+// parser paths are held to more: the identical event sequence, the error and
+// its reported position included — seeking is an optimization, not a second
+// parser. This pins every reader to a single definition of the format, across
+// the entire option space.
 func FuzzReadersAgree(f *testing.F) {
 	for _, seed := range fuzzSeeds {
 		f.Add(seed)
@@ -219,6 +232,17 @@ func FuzzReadersAgree(f *testing.F) {
 			sections, sectionsErr := riffbin.ReadSections(bytes.NewReader(b), mode.opts...)
 			streamed, streamedErr := chunksFlatten(t, struct{ io.Reader }{bytes.NewReader(b)}, mode.opts...)
 			seeked, seekedErr := chunksFlatten(t, bytes.NewReader(b), mode.opts...)
+
+			// the read-through and the seeking path must match event for event,
+			// error text — position and path included — and all
+			if df := cmp.Diff(streamed, seeked); df != "" {
+				t.Log(hex.Dump(b))
+				t.Fatalf("%s: the parser paths yield different chunks: %s", mode.name, df)
+			}
+			if errText(streamedErr) != errText(seekedErr) {
+				t.Log(hex.Dump(b))
+				t.Fatalf("%s: the parser paths report different errors:\n  read-through: %v\n  seeking:      %v", mode.name, streamedErr, seekedErr)
+			}
 
 			// the readers must agree not only on accept/reject but on the kind of
 			// rejection: a format error for one must not be clean EOF for another

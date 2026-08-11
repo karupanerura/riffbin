@@ -48,10 +48,13 @@
 // already-parsed tree. An input that ends before the first byte of the root
 // chunk header yields io.EOF.
 //
-// Every reader is strict by default. Malformed input yields a [SyntaxError],
-// which carries the byte offset and the chunk path and wraps [ErrInvalidFormat];
-// an I/O failure of the underlying reader surfaces as the reader's own error,
-// matched with errors.Is, and never as a format error:
+// Every reader is strict by default, and every reader — the tree readers, the
+// streaming parser, reading through or skipping by seeking — applies the same
+// rules: seeking is only an optimization, never a second parser. Malformed
+// input yields a [SyntaxError], which carries the byte offset and the chunk
+// path and wraps [ErrInvalidFormat]; an I/O failure of the underlying reader
+// surfaces as the reader's own error, matched with errors.Is, and never as a
+// format error:
 //
 //	chunk, err := riffbin.ReadAll(r)
 //	if errors.Is(err, riffbin.ErrInvalidFormat) {

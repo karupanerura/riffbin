@@ -158,6 +158,90 @@ func TestChunksReadsThroughWhenSeekingFails(t *testing.T) {
 	}
 }
 
+// charDeviceReader mimics *os.File over a character device or a procfs file:
+// a full ReadSeekerAt whose Seek succeeds but reports size 0 — /dev/zero,
+// /dev/urandom and /dev/null all do — while Read and ReadAt serve real bytes.
+type charDeviceReader struct{ r *bytes.Reader }
+
+func (c *charDeviceReader) Read(p []byte) (int, error) { return c.r.Read(p) }
+func (c *charDeviceReader) ReadAt(p []byte, off int64) (int, error) {
+	return c.r.ReadAt(p, off)
+}
+func (c *charDeviceReader) Seek(off int64, whence int) (int64, error) {
+	if whence == io.SeekEnd {
+		return 0, nil // no size to report
+	}
+	return c.r.Seek(off, whence)
+}
+
+// A seekable source whose measurement contradicts its stream must be read
+// through, not rejected: character devices and procfs files report size 0
+// while their reads produce data, and seeking is only an optimization.
+func TestChunksReadsThroughWhenMeasureLies(t *testing.T) {
+	t.Parallel()
+
+	expected, err := collectChunks(t, onlyReader{bytes.NewReader(paddedFileBytes)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := collectChunks(t, &charDeviceReader{r: bytes.NewReader(paddedFileBytes)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if df := cmp.Diff(expected, got); df != "" {
+		t.Errorf("diff = %s", df)
+	}
+
+	if _, err := riffbin.ReadSections(&charDeviceReader{r: bytes.NewReader(paddedFileBytes)}); err != nil {
+		t.Errorf("ReadSections should read through the lying measurement but got: %v", err)
+	}
+}
+
+// On a truncated file the seeking path must yield exactly what the
+// read-through path yields — the same intact chunks, then the same error at
+// the same offset. Seeking is an optimization, not a different parser.
+func TestChunksAgreeOnTruncatedInput(t *testing.T) {
+	t.Parallel()
+
+	full := append([]byte{}, paddedFileBytes...)
+	for n := 0; n < len(full); n++ {
+		truncated := full[:n]
+
+		collect := func(r io.Reader) ([]chunkEvent, string) {
+			var events []chunkEvent
+			var errText string
+			for info, err := range riffbin.Chunks(r) {
+				if err != nil {
+					errText = err.Error()
+					break
+				}
+				ev := chunkEvent{Depth: info.Depth, ID: info.ID.String(), BodySize: info.BodySize, BodyOffset: info.BodyOffset}
+				if info.Grouped() {
+					ev.GroupType = info.GroupType.String()
+				} else {
+					body, err := io.ReadAll(info.Body)
+					if err != nil {
+						errText = err.Error()
+						break
+					}
+					ev.Body = string(body)
+				}
+				events = append(events, ev)
+			}
+			return events, errText
+		}
+
+		plainEvents, plainErr := collect(onlyReader{bytes.NewReader(truncated)})
+		seekEvents, seekErr := collect(bytes.NewReader(truncated))
+		if df := cmp.Diff(plainEvents, seekEvents); df != "" {
+			t.Errorf("%d bytes: the paths yield different chunks: %s", n, df)
+		}
+		if plainErr != seekErr {
+			t.Errorf("%d bytes: the paths report different errors:\n  read-through: %s\n  seeking:      %s", n, plainErr, seekErr)
+		}
+	}
+}
+
 // A body left unread must be skipped, and BodyOffset must address it for later
 // reads — the streaming equivalent of what ReadSections provides.
 func TestChunksBodyOffsetAddressesUnreadBodies(t *testing.T) {
@@ -384,12 +468,19 @@ func TestChunksAgreesWithTreeReaders(t *testing.T) {
 				t.Parallel()
 				tree, treeErr := riffbin.ReadAll(bytes.NewReader(b), mode.opts...)
 				events, chunksErr := chunksFlatten(t, onlyReader{bytes.NewReader(b)}, mode.opts...)
+				seekEvents, seekErr := chunksFlatten(t, bytes.NewReader(b), mode.opts...)
 
 				if want := expected[name]; (treeErr == nil) != want {
 					t.Errorf("ReadAll should report accepted=%v but got: %v", want, treeErr)
 				}
 				if (treeErr == nil) != (chunksErr == nil) {
 					t.Errorf("the readers disagree: ReadAll=%v Chunks=%v", treeErr, chunksErr)
+				}
+				if df := cmp.Diff(events, seekEvents); df != "" {
+					t.Errorf("the parser paths yield different chunks: %s", df)
+				}
+				if errText(chunksErr) != errText(seekErr) {
+					t.Errorf("the parser paths report different errors:\n  read-through: %v\n  seeking:      %v", chunksErr, seekErr)
 				}
 				if treeErr == nil {
 					if df := cmp.Diff(flattenTree(t, tree), events); df != "" {

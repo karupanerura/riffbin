@@ -92,9 +92,12 @@ func (f readerOptionFunc) apply(c *readerConfig) { f(c) }
 // them: the call consumes exactly the root chunk and leaves the input right after it,
 // which is how a stream of concatenated RIFF chunks is read. A single 0x00 before the
 // root chunk header is skipped — the pad byte of a previous chunk whose writer did not
-// count it in the RIFF chunk size, which no chunk header can start with — so such
-// streams read on. Without the option that byte is still tolerated at the very end of
-// the input, after an odd-sized final chunk.
+// count it in the RIFF chunk size, which no chunk header can start with, so such
+// streams read on. (The skip has to happen at the start of the next read: on a
+// forward-only reader an uncounted pad byte can only be told from the next header by
+// reading it, and a byte read past the chunk could not be handed back between calls.)
+// Without the option that byte is still tolerated at the very end of the input, after
+// an odd-sized final chunk.
 func AllowTrailingData() ReaderOption {
 	return readerOptionFunc(func(c *readerConfig) { c.allowTrailingData = true })
 }
@@ -149,9 +152,12 @@ func (c ChunkInfo) Grouped() bool { return c.GroupType != (FourCC{}) }
 //
 // A grouped chunk is yielded once, before the chunks it contains; where it ends
 // is implied by the Depth of the chunks that follow. When r also implements
-// ReadSeekerAt, bodies left unread are skipped by seeking rather than read
-// through, and BodyOffset addresses them for later reads. A value whose stream
-// cannot actually seek — os.Stdin on a pipe or a terminal — is read through.
+// ReadSeekerAt, large bodies left unread are skipped by seeking rather than
+// read through, and BodyOffset addresses them for later reads. Seeking is only
+// an optimization: a value whose stream cannot actually seek, cannot be
+// measured, or reports a size its stream contradicts — os.Stdin on a pipe, a
+// character device, a procfs file — is read through, and every rule of the
+// format is applied the same way on both paths.
 //
 // The iteration yields at most one error, as its final pair: io.EOF when the
 // input ends before the first byte of the root chunk header, a SyntaxError
@@ -162,26 +168,12 @@ func (c ChunkInfo) Grouped() bool { return c.GroupType != (FourCC{}) }
 // again, which reads onward from wherever the input then stands.
 func Chunks(r io.Reader, opts ...ReaderOption) iter.Seq2[ChunkInfo, error] {
 	return func(yield func(ChunkInfo, error) bool) {
-		limit := int64(-1)
-		pr, _ := r.(ReadSeekerAt)
-		if pr != nil {
-			if origin, err := pr.Seek(0, io.SeekCurrent); err != nil {
-				// the type can seek but the stream cannot: read bodies through
-				pr = nil
-			} else if _, limit, err = measure(pr); err != nil {
-				// the stream seeks but cannot be measured — no SeekEnd, say.
-				// seeking is only an optimization here, so it must not reject
-				// input the plain reader path parses: restore the position
-				// and read through
-				if _, rerr := pr.Seek(origin, io.SeekStart); rerr != nil {
-					// the position is unknowable now; reading on would misparse
-					yield(ChunkInfo{}, err)
-					return
-				}
-				pr, limit = nil, -1
-			}
+		src, err := chunksSource(r)
+		if err != nil {
+			yield(ChunkInfo{}, err)
+			return
 		}
-		scan(r, pr, limit, opts, yield)
+		scan(src, resolveOptions(opts), yield)
 	}
 }
 
@@ -195,7 +187,7 @@ func Chunks(r io.Reader, opts ...ReaderOption) iter.Seq2[ChunkInfo, error] {
 // ReadAll repeatedly until io.EOF; Concatenated wraps that loop.
 func ReadAll(r io.Reader, opts ...ReaderOption) (*RIFFChunk, error) {
 	return buildTree(func(yield func(ChunkInfo, error) bool) {
-		scan(r, nil, -1, opts, yield)
+		scan(newPlainSource(r), resolveOptions(opts), yield)
 	}, nil, 0)
 }
 
@@ -210,12 +202,16 @@ func ReadAll(r io.Reader, opts ...ReaderOption) (*RIFFChunk, error) {
 // header, and with AllowTrailingData it leaves r right after the root chunk,
 // so repeated calls read a stream of concatenated RIFF chunks.
 func ReadSections(r ReadSeekerAt, opts ...ReaderOption) (*RIFFChunk, error) {
-	origin, limit, err := measure(r)
+	origin, err := r.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, fmt.Errorf("riffbin: get seek position: %w", err)
+	}
+	src, err := measuredSource(r, origin)
 	if err != nil {
 		return nil, err
 	}
 	return buildTree(func(yield func(ChunkInfo, error) bool) {
-		scan(r, r, limit, opts, yield)
+		scan(src, resolveOptions(opts), yield)
 	}, r, origin)
 }
 
@@ -239,22 +235,127 @@ func Concatenated(r io.Reader, opts ...ReaderOption) iter.Seq2[*RIFFChunk, error
 	}
 }
 
-// measure records where r stands and how many bytes remain to its end. The
-// parser needs the input measured up front when sub-chunk bodies are skipped
-// by seeking, because seeking past the end of a file succeeds silently.
-func measure(r io.Seeker) (origin, limit int64, err error) {
-	origin, err = r.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return 0, 0, fmt.Errorf("riffbin: get seek position: %w", err)
+// source is the parser's only view of the input: it owns the logical offset,
+// can hold one byte of lookahead, and skips unread bytes by seeking when that
+// is provably safe. The parser never learns which strategy is active, so a
+// rule of the format cannot apply on one path and not the other.
+type source struct {
+	r       io.Reader
+	seeker  io.Seeker // non-nil only when limit is known, so a seek cannot cross the end
+	limit   int64     // bytes from the start position to the end, or -1 when unknown
+	off     int64     // bytes delivered to the parser; a peeked byte is not yet counted
+	peeked  int16     // -1 when empty, else the byte waiting at off
+	scratch []byte    // the skip buffer, allocated once on first use
+}
+
+func newPlainSource(r io.Reader) *source {
+	return &source{r: r, limit: -1, peeked: -1}
+}
+
+// chunksSource probes r for the seek-skip optimization. Every obstacle —
+// not a ReadSeekerAt, a stream that cannot seek or be measured, a reported
+// size its stream contradicts (character devices and procfs files report 0) —
+// falls back to reading through. The only error is a stream left at an
+// unknowable position by a failed probe, which could not be parsed correctly
+// by either strategy.
+func chunksSource(r io.Reader) (*source, error) {
+	pr, ok := r.(ReadSeekerAt)
+	if !ok {
+		return newPlainSource(r), nil
 	}
+	origin, err := pr.Seek(0, io.SeekCurrent)
+	if err != nil {
+		// the type can seek but the stream cannot: read through
+		return newPlainSource(r), nil
+	}
+	return measuredSource(pr, origin)
+}
+
+// measuredSource measures how many bytes remain to the end of r and returns a
+// seeking source over them. The measurement exists because seeking past the
+// end of a file succeeds silently; when it fails or reports a size the stream
+// contradicts, the source reads through instead — seeking is only an
+// optimization, and must never change what the parser accepts.
+func measuredSource(r io.ReadSeeker, origin int64) (*source, error) {
 	size, err := r.Seek(0, io.SeekEnd)
 	if err != nil {
-		return 0, 0, fmt.Errorf("riffbin: seek to end: %w", err)
+		// the stream seeks but cannot be measured — no SeekEnd, say
+		if _, rerr := r.Seek(origin, io.SeekStart); rerr != nil {
+			// the position is unknowable now; reading on would misparse
+			return nil, fmt.Errorf("riffbin: seek: %w", rerr)
+		}
+		return newPlainSource(r), nil
 	}
-	if _, err = r.Seek(origin, io.SeekStart); err != nil {
-		return 0, 0, fmt.Errorf("riffbin: seek: %w", err)
+	if _, err := r.Seek(origin, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("riffbin: seek: %w", err)
 	}
-	return origin, size - origin, nil
+	if size <= origin {
+		return newPlainSource(r), nil
+	}
+	return &source{r: r, seeker: r, limit: size - origin, peeked: -1}, nil
+}
+
+func (s *source) Read(p []byte) (int, error) {
+	if s.peeked >= 0 && len(p) > 0 {
+		p[0] = byte(s.peeked)
+		s.peeked = -1
+		s.off++
+		return 1, nil
+	}
+	n, err := s.r.Read(p)
+	s.off += int64(n)
+	return n, err
+}
+
+// peek returns the byte at the current offset without consuming it. The byte
+// is delivered by the next Read; discardPeeked consumes it instead.
+func (s *source) peek() (byte, error) {
+	if s.peeked >= 0 {
+		return byte(s.peeked), nil
+	}
+	var b [1]byte
+	if _, err := io.ReadFull(s.r, b[:]); err != nil {
+		return 0, err
+	}
+	s.peeked = int16(b[0])
+	return b[0], nil
+}
+
+func (s *source) discardPeeked() {
+	s.peeked = -1
+	s.off++
+}
+
+// skip discards n bytes: by seeking when that is provably inside the input,
+// by reading through otherwise — so a skip past the end of the
+// input fails exactly like the read-through path, at the same offset. The
+// read-through runs over a stack buffer: a skip costs no allocation.
+func (s *source) skip(n int64) error {
+	if s.peeked >= 0 && n > 0 {
+		s.discardPeeked()
+		n--
+	}
+	if n == 0 {
+		return nil
+	}
+	if s.seeker != nil && s.off+n <= s.limit {
+		if _, err := s.seeker.Seek(n, io.SeekCurrent); err != nil {
+			return fmt.Errorf("riffbin: seek: %w", err)
+		}
+		s.off += n
+		return nil
+	}
+	if s.scratch == nil {
+		s.scratch = make([]byte, 4096)
+	}
+	for n > 0 {
+		step := min(n, int64(len(s.scratch)))
+		if _, err := io.ReadFull(s, s.scratch[:step]); err != nil {
+			return err
+		}
+		n -= step
+	}
+	return nil
 }
 
 // buildTree assembles the chunk tree from the events of a scan. With sec
@@ -331,27 +432,9 @@ func readLeafBody(id FourCC, r io.Reader, size int64) ([]byte, error) {
 	return payload, nil
 }
 
-// offsetReader is the single source of truth for how many bytes have been consumed.
-// Every chunk boundary is an absolute offset into this stream, so a sub-chunk that is
-// skipped by seeking only has to advance one counter for every enclosing chunk to stay correct.
-type offsetReader struct {
-	r   io.Reader
-	off int64
-}
-
-func (o *offsetReader) Read(p []byte) (int, error) {
-	n, err := o.r.Read(p)
-	o.off += int64(n)
-	return n, err
-}
-
 type parser struct {
-	src  *offsetReader
-	pr   ReadSeekerAt // non-nil when unread bodies are skipped by seeking
+	src  *source
 	conf readerConfig
-
-	// limit is the byte length of the input, or -1 when it is unknown.
-	limit int64
 
 	order binary.ByteOrder
 	path  []string
@@ -365,54 +448,61 @@ type parser struct {
 	bodyOff       int64 // the body offset, where a truncation is reported
 	bodyRemaining int64
 
-	// pending holds the byte probed where a pad byte was expected but a chunk header
-	// was found instead. It is only ever set with AllowOmittedPadding.
-	pending     bool
-	pendingByte byte
-
 	// tolerateTrailingPad is true when the chunk read last has an odd-sized body whose
 	// pad byte is not counted in its parent's size, so a single 0x00 may follow the
 	// root chunk. See verifyEnd.
 	tolerateTrailingPad bool
 }
 
-// scan is the parser: it reads one RIFF chunk from r and reports every chunk to
-// yield in document order. ReadAll, ReadSections and Chunks all consume it, so
-// each rule of the format lives here exactly once. It stops when yield reports
-// false; any failure is the final yield, and none may follow it.
-func scan(r io.Reader, pr ReadSeekerAt, limit int64, opts []ReaderOption, yield func(ChunkInfo, error) bool) {
-	p := &parser{src: &offsetReader{r: r}, pr: pr, limit: limit, conf: resolveOptions(opts)}
+// isEOFFamily reports whether err says the input ended: io.EOF or
+// io.ErrUnexpectedEOF, however wrapped. What that means depends on where the
+// parser stands — see scan.
+func isEOFFamily(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// scan is the parser: it reads one RIFF chunk from src and reports every chunk
+// to yield in document order. ReadAll, ReadSections and Chunks all consume it,
+// so each rule of the format lives here exactly once. It stops when yield
+// reports false; any failure is the final yield, and none may follow it.
+//
+// An EOF-family error from the underlying reader means the input ended there:
+// before the first byte of the root chunk header it is a clean io.EOF, inside
+// the structure it is a SyntaxError for the truncation, and while probing for
+// data after the root chunk it is a clean end. Any other error surfaces as the
+// reader's own.
+func scan(src *source, conf readerConfig, yield func(ChunkInfo, error) bool) {
+	p := &parser{src: src, conf: conf}
+
+	// with AllowTrailingData a single 0x00 before the header is skipped: it is
+	// the pad byte of a previous root chunk whose writer did not count it in
+	// the RIFF size — the byte the end-of-chunk probe tolerates after a single
+	// chunk — and no chunk header can start with 0x00, so it is unambiguous.
+	if conf.allowTrailingData {
+		switch b, err := src.peek(); {
+		case err == nil:
+			if b == 0x00 {
+				src.discardPeeked()
+			}
+		case isEOFFamily(err):
+			yield(ChunkInfo{}, io.EOF)
+			return
+		default:
+			yield(ChunkInfo{}, err)
+			return
+		}
+	}
 
 	// read the root header. a clean end of input before its first byte is io.EOF,
 	// not a syntax error, so that a stream of concatenated RIFF chunks can be read
-	// until it runs dry. with AllowTrailingData a single 0x00 before the header is
-	// skipped first: it is the pad byte of a previous root chunk whose writer did
-	// not count it in the RIFF size — the byte verifyEnd tolerates after a single
-	// chunk — and no chunk header can start with 0x00, so the byte is unambiguous.
+	// until it runs dry.
 	var buf [HeaderBytes]byte
-	headerOff, read := int64(0), 0
-	if p.conf.allowTrailingData {
-		for {
-			if _, err := io.ReadFull(p.src, buf[:1]); err != nil {
-				if errors.Is(err, io.EOF) {
-					yield(ChunkInfo{}, io.EOF)
-				} else {
-					yield(ChunkInfo{}, err)
-				}
-				return
-			}
-			if buf[0] != 0x00 || headerOff > 0 {
-				break
-			}
-			headerOff = 1
-		}
-		read = 1
-	}
-	if _, err := io.ReadFull(p.src, buf[read:]); err != nil {
+	headerOff := src.off
+	if _, err := io.ReadFull(src, buf[:]); err != nil {
 		switch {
-		case errors.Is(err, io.EOF) && read == 0:
+		case errors.Is(err, io.EOF):
 			yield(ChunkInfo{}, io.EOF)
-		case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		case errors.Is(err, io.ErrUnexpectedEOF):
 			yield(ChunkInfo{}, p.syntaxError(headerOff, "unexpected end of input while reading the root chunk header"))
 		default:
 			yield(ChunkInfo{}, err)
@@ -437,13 +527,7 @@ func scan(r io.Reader, pr ReadSeekerAt, limit int64, opts []ReaderOption, yield 
 	}
 
 	bodyLen := int64(p.order.Uint32(buf[IDBytes:]))
-	end := p.src.off + bodyLen
-	if p.limit >= 0 && end > p.limit {
-		yield(ChunkInfo{}, p.syntaxError(headerOff+IDBytes, "root chunk declares a %d byte body but the input holds only %d byte(s)", bodyLen, p.limit-p.src.off))
-		return
-	}
-
-	if !p.scanGroup(id, bodyLen, end, 0, yield) {
+	if !p.scanGroup(id, bodyLen, src.off+bodyLen, 0, yield) {
 		return
 	}
 
@@ -484,8 +568,9 @@ func (p *parser) scanGroup(id FourCC, bodyLen, end int64, depth int, yield func(
 		return false
 	}
 
-	// scan sub-chunks
-	for p.src.off < end || p.pending {
+	// scan sub-chunks; a byte left peeked by the padding policy sits at the
+	// current offset, so the loop condition needs no special case for it
+	for p.src.off < end {
 		if !p.scanChunk(end, depth+1, yield) {
 			return false
 		}
@@ -498,16 +583,12 @@ func (p *parser) scanGroup(id FourCC, bodyLen, end int64, depth int, yield func(
 func (p *parser) scanChunk(end int64, depth int, yield func(ChunkInfo, error) bool) bool {
 	// read header
 	var buf [HeaderBytes]byte
-	headerOff, read := p.src.off, 0
-	if p.pending {
-		buf[0], p.pending = p.pendingByte, false
-		headerOff, read = headerOff-1, 1
-	}
-	if remain := end - p.src.off; remain < int64(HeaderBytes-read) {
-		yield(ChunkInfo{}, p.syntaxError(headerOff, "%d trailing byte(s) are too few for a chunk header", remain+int64(read)))
+	headerOff := p.src.off
+	if remain := end - p.src.off; remain < HeaderBytes {
+		yield(ChunkInfo{}, p.syntaxError(headerOff, "%d trailing byte(s) are too few for a chunk header", remain))
 		return false
 	}
-	if err := p.readFull(buf[read:], "a chunk header"); err != nil {
+	if err := p.readFull(buf[:], "a chunk header"); err != nil {
 		yield(ChunkInfo{}, err)
 		return false
 	}
@@ -573,7 +654,7 @@ func (b *bodyReader) Read(q []byte) (int, error) {
 	}
 	n, err := p.src.Read(q)
 	p.bodyRemaining -= int64(n)
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if isEOFFamily(err) {
 		if p.bodyRemaining > 0 {
 			return n, p.syntaxError(p.bodyOff, "unexpected end of input while reading the %s chunk body", p.bodyID)
 		}
@@ -582,21 +663,15 @@ func (b *bodyReader) Read(q []byte) (int, error) {
 	return n, err
 }
 
-// skipBody discards what the consumer left unread of a leaf body: by seeking
-// when the source supports it, by reading it through otherwise.
+// skipBody discards what the consumer left unread of a leaf body. The source
+// seeks over a large body when that is provably safe and reads through
+// otherwise, so a truncated body fails identically on both paths.
 func (p *parser) skipBody(id FourCC, bodyOff, remaining int64) error {
 	if remaining == 0 {
 		return nil
 	}
-	if p.pr != nil {
-		if _, err := p.pr.Seek(remaining, io.SeekCurrent); err != nil {
-			return fmt.Errorf("riffbin: seek: %w", err)
-		}
-		p.src.off += remaining
-		return nil
-	}
-	if _, err := io.CopyN(io.Discard, p.src, remaining); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if err := p.src.skip(remaining); err != nil {
+		if isEOFFamily(err) {
 			return p.syntaxError(bodyOff, "unexpected end of input while reading the %s chunk body", id)
 		}
 		return fmt.Errorf("riffbin: read the %s chunk body: %w", id, err)
@@ -614,7 +689,7 @@ func (p *parser) verifyEnd() error {
 
 	var buf [1]byte
 	switch _, err := io.ReadFull(p.src, buf[:]); {
-	case errors.Is(err, io.EOF):
+	case isEOFFamily(err):
 		return nil
 	case err != nil:
 		return err
@@ -622,7 +697,7 @@ func (p *parser) verifyEnd() error {
 		return p.syntaxError(p.src.off-1, "unexpected data after the root chunk")
 	}
 
-	if _, err := io.ReadFull(p.src, buf[:]); errors.Is(err, io.EOF) {
+	if _, err := io.ReadFull(p.src, buf[:]); isEOFFamily(err) {
 		return nil
 	} else if err != nil {
 		return err
@@ -646,20 +721,25 @@ func (p *parser) skipPadding(id FourCC, bodyLen, end int64) error {
 	}
 
 	off := p.src.off
-	var buf [1]byte
-	if err := p.readFull(buf[:], "an alignment pad byte"); err != nil {
+	b, err := p.src.peek()
+	if err != nil {
+		if isEOFFamily(err) {
+			return p.syntaxError(off, "unexpected end of input while reading an alignment pad byte")
+		}
 		return err
 	}
 	switch {
-	case buf[0] == 0x00:
+	case b == 0x00:
+		p.src.discardPeeked()
 	case p.conf.padding == PadGarbage:
 		// a pad byte holding garbage; the reference readers never inspect the value
-	case p.conf.padding == PadOmitted && printableASCII(buf[0]):
+		p.src.discardPeeked()
+	case p.conf.padding == PadOmitted && printableASCII(b):
 		// chunk IDs are printable ASCII, so in a file whose writer omitted the
-		// pad byte, this byte heads the next chunk header
-		p.pending, p.pendingByte = true, buf[0]
+		// pad byte, this byte heads the next chunk header: leave it in place
 	default:
-		return p.syntaxError(off, "pad byte after the odd-sized %s chunk is %#02x, want 0x00", id, buf[0])
+		p.src.discardPeeked()
+		return p.syntaxError(off, "pad byte after the odd-sized %s chunk is %#02x, want 0x00", id, b)
 	}
 	return nil
 }
@@ -667,7 +747,7 @@ func (p *parser) skipPadding(id FourCC, bodyLen, end int64) error {
 func (p *parser) readFull(buf []byte, what string) error {
 	off := p.src.off
 	if _, err := io.ReadFull(p.src, buf); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		if isEOFFamily(err) {
 			return p.syntaxError(off, "unexpected end of input while reading %s", what)
 		}
 		return err
