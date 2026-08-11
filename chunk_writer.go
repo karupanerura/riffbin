@@ -92,11 +92,17 @@ func (w *StreamingWriter) WriteChunk(c *RIFFChunk) (n int64, err error) {
 	// inevitable, so the write stops right there instead of draining the
 	// rest of the stream.
 	cnt := &countingWriter{w: w.w}
+	bound := &cappedWriter{w: cnt, remaining: HeaderBytes + MaxBodySize, sentinel: errFileBoundExceeded}
 	var fixes []sizeFix
-	err = writePlan(&cappedWriter{w: cnt, remaining: HeaderBytes + MaxBodySize, sentinel: errFileBoundExceeded}, &plan, order, cnt, &fixes)
+	err = writePlan(bound, &plan, order, cnt, &fixes)
 	n = cnt.n
 	if err == nil {
 		err = cnt.firstErr
+	}
+	if err == nil && bound.truncated {
+		// the cap cut the output but its sentinel was swallowed by a body's
+		// own WriteTo: judged by the wrapper's record, not the error
+		err = errFileBoundExceeded
 	}
 	if err != nil {
 		if errors.Is(err, errFileBoundExceeded) {
@@ -398,10 +404,10 @@ func writeChunkBodySizeAt(w io.WriterAt, order binary.ByteOrder, b uint32, off i
 // very size its header carried: the header already went out with the planned
 // size, so a byte past it is a defect no matter what follows — the copy is
 // capped right there, and an endless body cannot flood the output. The copy
-// is judged by the bytes the cap actually let through, never by io.Copy's
-// count, which is whatever the body's own WriteTo returned: a short body is
-// caught just after however it is misreported, and either way the write
-// stops rather than emit a corrupt file.
+// is judged by what the cap recorded, never by io.Copy's error or count
+// alone: those pass through the body's own WriteTo, which can swallow them,
+// but the cap's truncated latch cannot be swallowed — either direction of
+// mismatch stops the write rather than emit a silently wrong file.
 func writePlanLeafBody(w io.Writer, p *planChunk) error {
 	want := int64(p.declared)
 	cw := &cappedWriter{w: w, remaining: want, sentinel: errDeclaredSizeExceeded}
@@ -410,6 +416,9 @@ func writePlanLeafBody(w io.Writer, p *planChunk) error {
 			return fmt.Errorf("%w: chunk[%q] declares %d byte(s) but its body produced more", ErrSizeMismatch, p.id, want)
 		}
 		return err
+	}
+	if cw.truncated {
+		return fmt.Errorf("%w: chunk[%q] declares %d byte(s) but its body produced more", ErrSizeMismatch, p.id, want)
 	}
 	if n := want - cw.remaining; n != want {
 		return fmt.Errorf("%w: chunk[%q] declares %d bytes but produced %d", ErrSizeMismatch, p.id, want, n)
@@ -451,21 +460,30 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 // it and fails with the sentinel its creator chose. A source staying within
 // the cap never notices — io.Copy keeps its WriteTo fast path — and one
 // producing more is cut off at the boundary instead of being drained.
+// Crossing the cap also latches truncated: the sentinel travels through the
+// source's own WriteTo, which can swallow it, but the latch cannot be.
 type cappedWriter struct {
 	w         io.Writer
 	remaining int64
 	sentinel  error
+	truncated bool
 }
 
 func (cw *cappedWriter) Write(p []byte) (int, error) {
 	over := int64(len(p)) > cw.remaining
 	if over {
 		p = p[:cw.remaining]
+		cw.truncated = true
 	}
 	var n int
 	var err error
 	if len(p) > 0 {
 		n, err = cw.w.Write(p)
+		if n > len(p) {
+			// a destination over-reporting its write must not drive the cap
+			// negative; the count of record is cnt's anyway
+			n = len(p)
+		}
 		cw.remaining -= int64(n)
 	}
 	if err == nil && over {

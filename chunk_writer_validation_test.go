@@ -804,8 +804,9 @@ func TestWriterRejectsNilBody(t *testing.T) {
 	}
 }
 
-// swallowingWriteToReader writes its payload through a WriteTo that discards
-// the destination's error — the shape that defeats an error-propagation check.
+// swallowingWriteToReader over-produces past its declared size and its WriteTo
+// discards the destination's error — the shape that defeats an error-propagation
+// check: the cap's own record has to catch it.
 type swallowingWriteToReader struct {
 	data string
 }
@@ -815,6 +816,51 @@ func (r *swallowingWriteToReader) Read(p []byte) (int, error) { return 0, io.EOF
 func (r *swallowingWriteToReader) WriteTo(w io.Writer) (int64, error) {
 	n, _ := io.WriteString(w, r.data) // the destination's error is dropped
 	return int64(n), nil
+}
+
+// swallowingSubChunk declares fewer bytes than its body produces, through a
+// WriteTo that swallows errors.
+type swallowingSubChunk struct {
+	declared int64
+	data     string
+}
+
+func (c *swallowingSubChunk) ChunkID() riffbin.FourCC { return riffbin.MustParseFourCC("DAT1") }
+func (c *swallowingSubChunk) BodySize() int64         { return c.declared }
+func (c *swallowingSubChunk) Body() io.Reader         { return &swallowingWriteToReader{data: c.data} }
+
+// Over-production must be caught even when the body's WriteTo swallows the
+// cap's sentinel error: the copy is judged by the cap's record of what it let
+// through, so the write fails instead of silently truncating the payload.
+func TestWriterRejectsOverproducingSwallowingBody(t *testing.T) {
+	t.Parallel()
+
+	tree := func() *riffbin.RIFFChunk {
+		return &riffbin.RIFFChunk{
+			FormType: riffbin.MustParseFourCC("TEST"),
+			Payload:  []riffbin.Chunk{&swallowingSubChunk{declared: 4, data: "abcdefgh"}},
+		}
+	}
+
+	t.Run("Writer", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		_, err := riffbin.NewWriter(&buf).WriteChunk(tree())
+		if !errors.Is(err, riffbin.ErrSizeMismatch) {
+			t.Errorf("should be ErrSizeMismatch but got: %v", err)
+		}
+	})
+	t.Run("StreamingWriter", func(t *testing.T) {
+		t.Parallel()
+		m := &memWriteSeeker{}
+		w, err := riffbin.NewStreamingWriter(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = w.WriteChunk(tree()); !errors.Is(err, riffbin.ErrSizeMismatch) {
+			t.Errorf("should be ErrSizeMismatch but got: %v", err)
+		}
+	})
 }
 
 // A destination failure swallowed by a streaming body's own WriteTo must still

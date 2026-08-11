@@ -104,8 +104,8 @@
 // reader — [SubChunk.Body] is called once per leaf, during planning — so the
 // write pass runs from the snapshot alone and the only caller code it enters
 // is the drain of the captured readers. Sizes and offsets are measured on the
-// destination side of every copy, and the counter's record is authoritative:
-// a method answering differently once planning is over, a body's WriteTo
+// destination side of every copy, and what the cap and the counter record is
+// authoritative: a method answering differently once planning is over, a body's WriteTo
 // misreporting its count, or one swallowing the destination's error therefore
 // cannot desynchronize the size fields from the bytes actually written, pass
 // a failed write off as a success, or drive the writers into unbounded
