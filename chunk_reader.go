@@ -15,6 +15,10 @@ import (
 // Real RIFF trees are shallow; the limit keeps hostile input from exhausting the stack.
 const maxGroupDepth = 100
 
+// skipSeekThreshold is the smallest unread body the parser skips by seeking.
+// A seek is a syscall; skips at or below this size are cheaper to read through.
+const skipSeekThreshold = 4096
+
 // ReadSeekerAt is the input required by ReadSections: Seek skips over the
 // sub-chunk bodies while parsing, and ReadAt serves them on demand afterwards.
 type ReadSeekerAt interface {
@@ -326,8 +330,8 @@ func (s *source) discardPeeked() {
 	s.off++
 }
 
-// skip discards n bytes: by seeking when that is provably inside the input,
-// by reading through otherwise — so a skip past the end of the
+// skip discards n bytes: by seeking when the skip is large and provably inside
+// the input, by reading through otherwise — so a skip past the end of the
 // input fails exactly like the read-through path, at the same offset. The
 // read-through runs over a stack buffer: a skip costs no allocation.
 func (s *source) skip(n int64) error {
@@ -338,7 +342,7 @@ func (s *source) skip(n int64) error {
 	if n == 0 {
 		return nil
 	}
-	if s.seeker != nil && s.off+n <= s.limit {
+	if s.seeker != nil && n > skipSeekThreshold && s.off+n <= s.limit {
 		if _, err := s.seeker.Seek(n, io.SeekCurrent); err != nil {
 			return fmt.Errorf("riffbin: seek: %w", err)
 		}
