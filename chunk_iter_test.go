@@ -360,6 +360,25 @@ func TestWalk(t *testing.T) {
 		}
 	})
 
+	t.Run("CyclicTreePanics", func(t *testing.T) {
+		// a self-referential hand-built tree would otherwise iterate forever;
+		// the depth bound turns the hang into a loud programmer error
+		t.Parallel()
+		cyclic := &riffbin.ListChunk{ListType: riffbin.MustParseFourCC("LOOP")}
+		cyclic.Payload = []riffbin.Chunk{cyclic}
+
+		defer func() {
+			if recover() == nil {
+				t.Error("walking a cyclic tree should panic at the depth bound")
+			}
+		}()
+		count := 0
+		for range riffbin.Walk(cyclic) {
+			if count++; count > 1_000_000 {
+				t.Fatal("the walk neither ended nor panicked")
+			}
+		}
+	})
 }
 
 func TestConcatenated(t *testing.T) {
